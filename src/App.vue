@@ -247,6 +247,17 @@
                     </div>
                 </div>
 
+                <div v-if="viewMode === 'workspace' && workspaceMode === 'image'" class="mb-6">
+                    <BaseCard title="📦 批量出图">
+                        <BatchImportPanel
+                            :importing="batchImporting"
+                            :result="batchImportResult"
+                            @download-template="handleDownloadImportTemplate"
+                            @import-file="handleImportTasksFile"
+                        />
+                    </BaseCard>
+                </div>
+
                 <div v-if="viewMode === 'workspace'" class="mb-6">
                     <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
                         <BaseButton
@@ -296,9 +307,14 @@
                 <div v-else-if="viewMode === 'gallery'" class="mb-6">
                     <GalleryView
                         :entries="paginatedGalleryEntries"
-                        :total="galleryEntries.length"
+                        :total="filteredGalleryEntries.length"
                         :page="galleryPage"
                         :page-count="totalGalleryPages"
+                        :templates="templates"
+                        v-model:filter-mode="galleryFilterMode"
+                        v-model:filter-style-id="galleryFilterStyleId"
+                        v-model:filter-date-from="galleryFilterDateFrom"
+                        v-model:filter-date-to="galleryFilterDateTo"
                         @refresh="loadGallery"
                         @delete-entry="handleDeleteGalleryEntry"
                         @change-page="changeGalleryPage"
@@ -325,7 +341,14 @@
 	                        />
                     </template>
                     <template v-else>
-                        <TasksView :tasks="tasksList" :loading="tasksLoading" :error="tasksError" @refresh="loadTasksList" />
+                        <TasksView
+                            :tasks="tasksList"
+                            :loading="tasksLoading"
+                            :error="tasksError"
+                            :retrying-id="retryingTaskId"
+                            @refresh="loadTasksList"
+                            @retry="handleRetryTask"
+                        />
                     </template>
                 </div>
 
@@ -342,6 +365,7 @@ import BaseInput from './components/BaseInput.vue'
 import ApiConfigSelector from './components/ApiConfigSelector.vue'
 import ImageUpload from './components/ImageUpload.vue'
 import StylePromptSelector from './components/StylePromptSelector.vue'
+import BatchImportPanel from './components/BatchImportPanel.vue'
 import ResultDisplay from './components/ResultDisplay.vue'
 import AspectRatioSelector from './components/AspectRatioSelector.vue'
 import Gemini3ProConfig from './components/Gemini3ProConfig.vue'
@@ -358,6 +382,7 @@ import {
     deleteApiConfig as deleteApiConfigRequest,
     deleteGalleryEntry as deleteGalleryEntryRequest,
     deleteTemplate as deleteTemplateRequest,
+    downloadTaskImportTemplate,
     exportTemplates,
     fetchApiConfigs,
     fetchGallery,
@@ -366,8 +391,10 @@ import {
     fetchTasks,
     fetchModels,
     fetchTemplates,
+    importTasksBatch,
     importTemplates,
     login,
+    retryGenerateTask,
     setDefaultApiConfig as setDefaultApiConfigRequest,
     subscribeGenerateTaskEvents,
     subscribeServerLogsEvents,
@@ -385,6 +412,7 @@ import type {
     GenerateTask,
     ServerLogEntry,
     CreateApiConfigPayload,
+    TaskImportResponse,
     UpdateApiConfigPayload
 } from './types'
 import { DEFAULT_MODEL_ID } from './config/api'
@@ -420,14 +448,33 @@ const templates = ref<StyleTemplate[]>([])
 const galleryEntries = ref<GalleryEntry[]>([])
 const galleryPage = ref(1)
 const isMobileGallery = ref(false)
+const galleryFilterMode = ref('')
+const galleryFilterStyleId = ref('')
+const galleryFilterDateFrom = ref('')
+const galleryFilterDateTo = ref('')
 const galleryPageSize = computed(() => (isMobileGallery.value ? 6 : 12))
+const filteredGalleryEntries = computed(() => {
+    return galleryEntries.value.filter(entry => {
+        if (galleryFilterMode.value && (entry.mode || 'standard') !== galleryFilterMode.value) return false
+        if (galleryFilterStyleId.value && entry.styleId !== galleryFilterStyleId.value) return false
+        if (galleryFilterDateFrom.value) {
+            const from = new Date(`${galleryFilterDateFrom.value}T00:00:00`).getTime()
+            if (Date.parse(entry.createdAt) < from) return false
+        }
+        if (galleryFilterDateTo.value) {
+            const to = new Date(`${galleryFilterDateTo.value}T23:59:59`).getTime()
+            if (Date.parse(entry.createdAt) > to) return false
+        }
+        return true
+    })
+})
 const totalGalleryPages = computed(() => {
-    const total = galleryEntries.value.length
+    const total = filteredGalleryEntries.value.length
     return Math.max(1, Math.ceil(Math.max(total, 1) / galleryPageSize.value))
 })
 const paginatedGalleryEntries = computed(() => {
     const start = (galleryPage.value - 1) * galleryPageSize.value
-    return galleryEntries.value.slice(start, start + galleryPageSize.value)
+    return filteredGalleryEntries.value.slice(start, start + galleryPageSize.value)
 })
 const selectedGalleryEntry = ref<GalleryEntry | null>(null)
 
@@ -440,6 +487,7 @@ const logsLimit = ref(LocalStorage.getLogsLimit(300))
 const tasksList = ref<GenerateTask[]>([])
 const tasksLoading = ref(false)
 const tasksError = ref<string | null>(null)
+const retryingTaskId = ref<string | null>(null)
 
 const selectedImages = ref<string[]>([])
 const selectedStyle = ref('')
@@ -464,6 +512,8 @@ const imageTaskHint = ref<string | null>(null)
 const textTaskHint = ref<string | null>(null)
 
 const generateMode = ref<'standard' | 'brand'>('standard')
+const batchImporting = ref(false)
+const batchImportResult = ref<TaskImportResponse | null>(null)
 const selectedAspectRatio = ref('1:1')
 const gemini3ImageSize = ref('2K')
 const gemini3EnableGoogleSearch = ref(false)
@@ -547,7 +597,11 @@ const handleGalleryResize = () => {
     isMobileGallery.value = window.innerWidth < 768
 }
 
-watch([() => galleryEntries.value.length, galleryPageSize], () => {
+watch([galleryFilterMode, galleryFilterStyleId, galleryFilterDateFrom, galleryFilterDateTo], () => {
+    galleryPage.value = 1
+})
+
+watch([() => filteredGalleryEntries.value.length, galleryPageSize], () => {
     const max = totalGalleryPages.value
     if (galleryPage.value > max) {
         galleryPage.value = max
@@ -1050,6 +1104,21 @@ const loadTasksList = async () => {
     }
 }
 
+const handleRetryTask = async (id: string) => {
+    if (!authToken.value) return
+    retryingTaskId.value = id
+    try {
+        await retryGenerateTask(authToken.value, id)
+        showNotice('success', '已重新提交任务')
+        await loadTasksList()
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '重试失败'
+        showNotice('error', message)
+    } finally {
+        retryingTaskId.value = null
+    }
+}
+
 const startLogsStream = () => {
     if (!authToken.value) return
     stopLogsStream?.()
@@ -1477,6 +1546,62 @@ const handleImportTemplates = async (fileBase64: string) => {
     } catch (error) {
         const message = error instanceof Error ? error.message : '导入失败'
         showNotice('error', message)
+    }
+}
+
+const handleDownloadImportTemplate = async () => {
+    if (!authToken.value) return
+    try {
+        const blob = await downloadTaskImportTemplate(authToken.value)
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `批量导入模板-${Date.now()}.xlsx`
+        link.rel = 'noopener'
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(url)
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '下载模板失败'
+        showNotice('error', message)
+    }
+}
+
+const handleImportTasksFile = async (fileBase64: string) => {
+    if (!authToken.value) return
+    if (!selectedConfigId.value) {
+        showNotice('error', '请先选择 API 配置')
+        return
+    }
+    batchImporting.value = true
+    batchImportResult.value = null
+    try {
+        const model = selectedModelId.value || selectedConfig.value?.model || DEFAULT_MODEL_ID
+        const common: Record<string, unknown> = {
+            configId: selectedConfigId.value,
+            model,
+            aspectRatio: showAspectRatioSelector.value ? selectedAspectRatio.value : undefined,
+            imageSize: showImageSizeConfig.value ? gemini3ImageSize.value : undefined,
+            enableGoogleSearch: showGoogleSearchConfig.value ? gemini3EnableGoogleSearch.value : undefined
+        }
+        if (isOpenAIImageModel(model)) {
+            common.aspectRatio = undefined
+            common.imageSize = undefined
+            common.enableGoogleSearch = undefined
+            common.size = resolveOpenAIImageSize()
+            common.quality = openAIImageQuality.value
+            common.outputFormat = openAIOutputFormat.value
+        }
+        const result = await importTasksBatch(authToken.value, fileBase64, common)
+        batchImportResult.value = result
+        showNotice('success', `导入完成：成功 ${result.imported} 条，失败 ${result.failed.length} 条`)
+        await loadTasksList()
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '批量导入失败'
+        showNotice('error', message)
+    } finally {
+        batchImporting.value = false
     }
 }
 

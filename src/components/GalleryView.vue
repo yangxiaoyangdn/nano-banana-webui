@@ -12,9 +12,61 @@
             </div>
         </template>
 
+        <div class="flex flex-wrap items-end gap-3 mb-4 pb-4 border-b border-dark-border/50">
+            <div class="flex flex-col gap-1">
+                <label class="text-xs font-bold text-dark-muted">模式</label>
+                <select
+                    :value="filterMode"
+                    class="modern-input text-sm py-1.5"
+                    @change="$emit('update:filterMode', ($event.target as HTMLSelectElement).value)"
+                >
+                    <option value="">全部</option>
+                    <option value="standard">标准</option>
+                    <option value="brand">品牌</option>
+                </select>
+            </div>
+            <div class="flex flex-col gap-1">
+                <label class="text-xs font-bold text-dark-muted">风格</label>
+                <select
+                    :value="filterStyleId"
+                    class="modern-input text-sm py-1.5"
+                    @change="$emit('update:filterStyleId', ($event.target as HTMLSelectElement).value)"
+                >
+                    <option value="">全部</option>
+                    <option v-for="style in templates" :key="style.id" :value="style.id">{{ style.name }}</option>
+                </select>
+            </div>
+            <div class="flex flex-col gap-1">
+                <label class="text-xs font-bold text-dark-muted">起始日期</label>
+                <input
+                    type="date"
+                    :value="filterDateFrom"
+                    class="modern-input text-sm py-1.5"
+                    @change="$emit('update:filterDateFrom', ($event.target as HTMLInputElement).value)"
+                />
+            </div>
+            <div class="flex flex-col gap-1">
+                <label class="text-xs font-bold text-dark-muted">结束日期</label>
+                <input
+                    type="date"
+                    :value="filterDateTo"
+                    class="modern-input text-sm py-1.5"
+                    @change="$emit('update:filterDateTo', ($event.target as HTMLInputElement).value)"
+                />
+            </div>
+            <BaseButton
+                v-if="filterMode || filterStyleId || filterDateFrom || filterDateTo"
+                variant="secondary"
+                class="text-sm py-1.5 px-3"
+                @click="clearFilters"
+            >
+                ✖ 清空筛选
+            </BaseButton>
+        </div>
+
         <div v-if="!entries.length" class="flex-1 flex flex-col items-center justify-center text-center gap-2 text-dark-muted py-10">
             <div class="text-5xl opacity-50">🍌</div>
-            <p class="font-bold">还没有作品，快去工作区创作吧！</p>
+            <p class="font-bold">{{ hasActiveFilter ? '没有匹配筛选条件的作品' : '还没有作品，快去工作区创作吧！' }}</p>
         </div>
 
         <div v-else class="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -94,23 +146,44 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import BaseButton from './BaseButton.vue'
 import BaseCard from './BaseCard.vue'
-import type { GalleryEntry } from '../types'
+import type { GalleryEntry, StyleTemplate } from '../types'
 
-defineProps<{
+const props = defineProps<{
     entries: GalleryEntry[]
     total: number
     page: number
     pageCount: number
+    templates: StyleTemplate[]
+    filterMode: string
+    filterStyleId: string
+    filterDateFrom: string
+    filterDateTo: string
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
     refresh: []
     'change-page': [page: number]
     'delete-entry': [id: string]
     'show-detail': [entry: GalleryEntry]
+    'update:filterMode': [value: string]
+    'update:filterStyleId': [value: string]
+    'update:filterDateFrom': [value: string]
+    'update:filterDateTo': [value: string]
 }>()
+
+const hasActiveFilter = computed(
+    () => Boolean(props.filterMode || props.filterStyleId || props.filterDateFrom || props.filterDateTo)
+)
+
+const clearFilters = () => {
+    emit('update:filterMode', '')
+    emit('update:filterStyleId', '')
+    emit('update:filterDateFrom', '')
+    emit('update:filterDateTo', '')
+}
 
 const modeLabel = (mode?: string) => (mode === 'brand' ? '品牌' : '标准')
 const modeBadgeClass = (mode?: string) =>

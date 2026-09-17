@@ -9,6 +9,7 @@ import type {
     GenerateTask,
     ServerLogEntry,
     StyleTemplate,
+    TaskImportResponse,
     UpdateApiConfigPayload
 } from '../types'
 
@@ -146,8 +147,32 @@ export async function fetchGenerateTask(token: string, id: string) {
     return request<GenerateTask>(`/api/generate/task/${id}`, { method: 'GET' }, token)
 }
 
+export async function downloadTaskImportTemplate(token: string): Promise<Blob> {
+    const response = await fetch(`${getApiBaseUrl()}/api/generate/tasks/import-template`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` }
+    })
+    if (!response.ok) {
+        const message = await extractErrorMessage(response)
+        throw new Error(message)
+    }
+    return response.blob()
+}
+
+export async function importTasksBatch(token: string, fileBase64: string, common: Record<string, unknown>) {
+    return request<TaskImportResponse>(
+        '/api/generate/tasks/import',
+        { method: 'POST', body: JSON.stringify({ fileBase64, ...common }) },
+        token
+    )
+}
+
 export async function cancelGenerateTask(token: string, id: string) {
     return request<GenerateTask>(`/api/generate/task/${id}`, { method: 'DELETE' }, token)
+}
+
+export async function retryGenerateTask(token: string, id: string) {
+    return request<{ taskId: string; status: string }>(`/api/generate/task/${id}/retry`, { method: 'POST' }, token)
 }
 
 export async function fetchTasks(token: string, limit = 200) {

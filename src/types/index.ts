@@ -18,6 +18,17 @@ export interface GenerateRequest {
     mode?: GenerateMode
 }
 
+export interface TaskImportRowFailure {
+    row: number
+    reason: string
+}
+
+export interface TaskImportResponse {
+    imported: number
+    failed: TaskImportRowFailure[]
+    taskIds: string[]
+}
+
 export type GenerateTaskStatus = 'queued' | 'running' | 'saving' | 'done' | 'failed' | 'canceled'
 
 export interface GenerateTaskResult {

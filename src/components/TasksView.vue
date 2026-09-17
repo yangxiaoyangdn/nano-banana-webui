@@ -61,8 +61,17 @@
                         </div>
                     </div>
 
-                    <div v-if="item.error" class="mt-2 text-xs text-dark-danger break-words">
-                        {{ item.error }}
+                    <div v-if="item.error" class="mt-2 flex items-center justify-between gap-2">
+                        <span class="text-xs text-dark-danger break-words">{{ item.error }}</span>
+                        <BaseButton
+                            v-if="item.status === 'failed' || item.status === 'canceled'"
+                            variant="secondary"
+                            class="text-xs py-1 px-2 flex-shrink-0"
+                            :loading="props.retryingId === item.id"
+                            @click="emit('retry', item.id)"
+                        >
+                            🔁 重试
+                        </BaseButton>
                     </div>
 
                     <div v-if="item.result?.galleryEntry" class="mt-3 flex flex-wrap items-center gap-3">
@@ -109,10 +118,12 @@ const props = defineProps<{
     tasks: GenerateTask[]
     loading: boolean
     error: string | null
+    retryingId?: string | null
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
     refresh: []
+    retry: [id: string]
 }>()
 
 const keyword = ref('')

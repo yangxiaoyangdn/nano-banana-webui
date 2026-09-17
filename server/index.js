@@ -694,6 +694,62 @@ function parseStyleWorkbook(buffer) {
     return records
 }
 
+// 模块①-b 批量导入：每一行 = 一个出图任务（参考图链接 + 风格库标签 + 标准/品牌模式）。
+// 表头定位逻辑与风格库表格一致，容忍表头前有说明行。
+const TASK_IMPORT_HEADERS = ['参考图链接', '风格名称', '模式', '特殊要求']
+const TASK_IMPORT_FIELD_BY_HEADER = {
+    参考图链接: 'imageUrl',
+    风格名称: 'styleName',
+    模式: 'mode',
+    特殊要求: 'note'
+}
+
+function buildTaskImportTemplateWorkbook() {
+    const rows = [
+        {
+            参考图链接: 'https://example.com/reference.jpg',
+            风格名称: '法式复古街拍',
+            模式: '标准',
+            特殊要求: ''
+        }
+    ]
+    const worksheet = XLSX.utils.json_to_sheet(rows, { header: TASK_IMPORT_HEADERS })
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, '批量导入')
+    return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })
+}
+
+function parseTaskImportWorkbook(buffer) {
+    const workbook = XLSX.read(buffer, { type: 'buffer' })
+    const sheetName = workbook.SheetNames[0]
+    if (!sheetName) return []
+    const sheet = workbook.Sheets[sheetName]
+    const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+
+    const headerRowIndex = grid.findIndex(row => Array.isArray(row) && row.some(cell => String(cell || '').trim() === '参考图链接'))
+    if (headerRowIndex === -1) return []
+
+    const headerRow = grid[headerRowIndex].map(cell => String(cell || '').trim())
+    const columnIndexByField = {}
+    headerRow.forEach((header, index) => {
+        const field = TASK_IMPORT_FIELD_BY_HEADER[header]
+        if (field) columnIndexByField[field] = index
+    })
+
+    const records = []
+    for (let i = headerRowIndex + 1; i < grid.length; i++) {
+        const row = grid[i]
+        if (!row) continue
+        const record = {}
+        for (const [field, index] of Object.entries(columnIndexByField)) {
+            const value = row[index]
+            record[field] = typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+        }
+        if (record.imageUrl) records.push(record)
+    }
+    return records
+}
+
 function authMiddleware(req, res, next) {
     const header = req.headers.authorization
     if (!header) {
@@ -1139,6 +1195,89 @@ app.post('/api/generate/task', authMiddleware, async (req, res) => {
     }
 })
 
+app.get('/api/generate/tasks/import-template', authMiddleware, async (req, res) => {
+    try {
+        const buffer = buildTaskImportTemplateWorkbook()
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        res.setHeader('Content-Disposition', 'attachment; filename="batch-import-template.xlsx"')
+        res.send(buffer)
+    } catch (error) {
+        logError('任务', '导出批量导入模板失败', error, req.requestId)
+        res.status(500).json({ message: '导出失败' })
+    }
+})
+
+// 模块①-b：批量导入 Excel，每一行转换成一个独立任务，喂给现有排队处理（enqueueTask），
+// 队列本身不用改——原来一次提交一个任务，现在只是循环提交多次。
+app.post('/api/generate/tasks/import', authMiddleware, async (req, res) => {
+    const { fileBase64, ...common } = req.body || {}
+    if (!fileBase64 || typeof fileBase64 !== 'string') {
+        return res.status(400).json({ message: '缺少文件内容' })
+    }
+    if (!common.configId) {
+        return res.status(400).json({ message: '必须指定 API 配置' })
+    }
+
+    try {
+        const base64Data = fileBase64.includes(',') ? fileBase64.split(',').pop() : fileBase64
+        const buffer = Buffer.from(base64Data, 'base64')
+        const rows = parseTaskImportWorkbook(buffer)
+        if (!rows.length) {
+            return res.status(400).json({ message: '未解析到有效数据，请确认"参考图链接"列已填写' })
+        }
+
+        const config = await loadConfig()
+        const templates = (config.templates || []).map(normalizeStyleTemplate)
+        const styleByName = new Map(templates.map(item => [item.name, item]))
+
+        const taskIds = []
+        const failed = []
+
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i]
+            const rowNum = i + 2 // 表头占一行，行号从数据第一行=2开始，方便对照 Excel
+            const style = row.styleName ? styleByName.get(row.styleName) : null
+            if (row.styleName && !style) {
+                failed.push({ row: rowNum, reason: `找不到风格"${row.styleName}"` })
+                continue
+            }
+
+            const payload = {
+                ...common,
+                images: [row.imageUrl],
+                mode: row.mode === '品牌' ? 'brand' : 'standard'
+            }
+            if (style) {
+                payload.styleId = style.id
+                payload.specialRequirements = row.note || ''
+                payload.prompt = assembleStyleInstruction(style, payload.specialRequirements)
+            } else {
+                payload.prompt = row.note || ''
+            }
+
+            const payloadError = validateGeneratePayload(payload)
+            if (payloadError) {
+                failed.push({ row: rowNum, reason: payloadError })
+                continue
+            }
+
+            try {
+                const task = createTaskState({ requestId: req.requestId, token: '', payload })
+                enqueueTask(task)
+                taskIds.push(task.id)
+            } catch (error) {
+                failed.push({ row: rowNum, reason: error instanceof Error ? error.message : '任务队列繁忙' })
+            }
+        }
+
+        logInfo('任务', `批量导入完成：成功 ${taskIds.length} 条，失败 ${failed.length} 条`, { failed }, req.requestId)
+        res.json({ imported: taskIds.length, failed, taskIds })
+    } catch (error) {
+        logError('任务', '批量导入失败', error, req.requestId)
+        res.status(400).json({ message: '文件解析失败，请确认文件格式是否正确' })
+    }
+})
+
 app.get('/api/generate/task/:id', authMiddleware, (req, res) => {
     const task = tasks.get(req.params.id)
     if (!task) {
@@ -1201,6 +1340,25 @@ app.delete('/api/generate/task/:id', authMiddleware, (req, res) => {
     broadcastTaskEvent(task.id, 'canceled', publicTaskView(task))
     logInfo('任务', '已取消任务', { taskId: task.id }, req.requestId)
     res.json(publicTaskView(task))
+})
+
+app.post('/api/generate/task/:id/retry', authMiddleware, (req, res) => {
+    const task = tasks.get(req.params.id)
+    if (!task) {
+        return res.status(404).json({ message: '任务不存在' })
+    }
+    if (task.status !== 'failed' && task.status !== 'canceled') {
+        return res.status(400).json({ message: '只有失败或已取消的任务才能重试' })
+    }
+    try {
+        const retryTask = createTaskState({ requestId: req.requestId, token: '', payload: task.rawPayload })
+        enqueueTask(retryTask)
+        logInfo('任务', '已重试任务', { originalTaskId: task.id, newTaskId: retryTask.id }, req.requestId)
+        res.status(202).json({ taskId: retryTask.id, status: retryTask.status })
+    } catch (error) {
+        logError('任务', '重试任务失败', error, req.requestId)
+        res.status(429).json({ message: error instanceof Error ? error.message : '任务队列繁忙，请稍后重试' })
+    }
 })
 
 async function fetchModels(apiConfig) {
