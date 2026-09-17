@@ -9,7 +9,7 @@
                         activeTab === 'style' ? 'bg-dark-surfaceHighlight text-dark-accent shadow-sm' : 'text-dark-muted hover:text-dark-text'
                     ]"
                 >
-                    🍱 预设风格
+                    🍱 风格库
                 </button>
                 <button
                     @click="activeTab = 'custom'"
@@ -21,13 +21,32 @@
                     ✍️ 自定义
                 </button>
             </div>
-            <BaseButton
-                @click="openCreateForm"
-                variant="secondary"
-                class="text-sm py-1.5 px-3"
-            >
-                ➕ 新建
-            </BaseButton>
+            <div class="flex items-center gap-2">
+                <input ref="importInput" type="file" accept=".xlsx" class="hidden" @change="handleImportFile" />
+                <BaseButton
+                    @click="emit('export-templates')"
+                    variant="secondary"
+                    class="text-sm py-1.5 px-3"
+                    title="导出为 Excel"
+                >
+                    ⬇️ 导出
+                </BaseButton>
+                <BaseButton
+                    @click="importInput?.click()"
+                    variant="secondary"
+                    class="text-sm py-1.5 px-3"
+                    title="从 Excel 导入"
+                >
+                    ⬆️ 导入
+                </BaseButton>
+                <BaseButton
+                    @click="openCreateForm"
+                    variant="secondary"
+                    class="text-sm py-1.5 px-3"
+                >
+                    ➕ 新建风格
+                </BaseButton>
+            </div>
         </div>
 
         <div v-if="activeTab === 'style'" class="flex-1 overflow-y-auto custom-scrollbar pr-1 flex flex-col gap-3">
@@ -47,13 +66,13 @@
                         <img
                             v-if="template.image"
                             :src="template.image"
-                            :alt="template.title"
+                            :alt="template.name"
                             class="w-14 h-14 rounded-lg border border-dark-border object-cover flex-shrink-0"
                         />
 
                         <div class="flex-1 min-w-0 space-y-1">
                             <div class="flex items-center justify-between gap-2">
-                                <div class="text-sm font-bold text-dark-text truncate">{{ template.title }}</div>
+                                <div class="text-sm font-bold text-dark-text truncate">{{ template.name }}</div>
                                 <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                     <button
                                         class="text-xs px-2 py-1 rounded bg-dark-surface hover:bg-dark-border text-dark-muted hover:text-dark-text"
@@ -71,7 +90,7 @@
                                     </button>
                                 </div>
                             </div>
-                            <p class="text-xs text-dark-muted line-clamp-2">{{ template.description }}</p>
+                            <p class="text-xs text-dark-muted line-clamp-2">{{ template.subject }}</p>
                         </div>
                     </div>
                 </div>
@@ -82,6 +101,16 @@
                 <div class="text-xs text-dark-muted font-semibold">第 {{ stylePage }} / {{ totalStylePages }} 页</div>
                 <BaseButton variant="secondary" :disabled="stylePage >= totalStylePages" @click="stylePage += 1">下一页</BaseButton>
             </div>
+
+            <BaseInput
+                v-if="selectedStyle"
+                type="textarea"
+                :modelValue="customPrompt"
+                @update:modelValue="value => emit('update:customPrompt', value)"
+                label="✏️ 特殊要求（选填）"
+                placeholder="风格库字段之外，还想额外强调的点，例如：这次要露出品牌 logo..."
+                :rows="3"
+            />
         </div>
 
         <div v-else class="flex flex-col gap-3 flex-1 h-full">
@@ -99,13 +128,13 @@
 
         <form v-if="showEditor" class="bg-dark-bg border border-dashed border-dark-border rounded-lg p-4 space-y-3" @submit.prevent="handleSubmit">
             <div class="flex items-center justify-between gap-2">
-                <h4 class="font-bold text-dark-text">{{ editorMode === 'create' ? '新增模板' : '编辑模板' }}</h4>
+                <h4 class="font-bold text-dark-text">{{ editorMode === 'create' ? '新增风格档案' : '编辑风格档案' }}</h4>
                 <button type="button" class="text-sm text-dark-muted hover:text-dark-text" @click="closeEditor">✖ 关闭</button>
             </div>
             <div class="grid md:grid-cols-2 gap-3">
                 <BaseInput
-                    label="模板标题"
-                    v-model="form.title"
+                    label="风格名称"
+                    v-model="form.name"
                     required
                 />
                 <BaseInput
@@ -115,15 +144,39 @@
                 />
             </div>
             <BaseInput
-                label="描述"
-                v-model="form.description"
+                type="textarea"
+                label="主体特征"
+                v-model="form.subject"
+                placeholder="人物/产品应该呈现的质感、状态"
+                :rows="2"
             />
             <BaseInput
                 type="textarea"
-                label="提示词"
-                v-model="form.prompt"
-                required
-                :rows="3"
+                label="环境基调"
+                v-model="form.environment"
+                placeholder="场景、光线、氛围"
+                :rows="2"
+            />
+            <BaseInput
+                type="textarea"
+                label="构图规则"
+                v-model="form.composition"
+                placeholder="镜头角度、景深、取景方式"
+                :rows="2"
+            />
+            <BaseInput
+                type="textarea"
+                label="色彩分级"
+                v-model="form.colorGrading"
+                placeholder="整体色调倾向"
+                :rows="2"
+            />
+            <BaseInput
+                type="textarea"
+                label="禁用项"
+                v-model="form.forbidden"
+                placeholder="这个风格绝对不能出现的东西"
+                :rows="2"
             />
             <p v-if="formError" class="text-sm text-dark-danger font-semibold">{{ formError }}</p>
             <div class="flex items-center gap-2 justify-end">
@@ -152,7 +205,25 @@ const emit = defineEmits<{
     'create-template': [value: Omit<StyleTemplate, 'id'>]
     'update-template': [value: StyleTemplate]
     'delete-template': [id: string]
+    'export-templates': []
+    'import-templates': [fileBase64: string]
 }>()
+
+const importInput = ref<HTMLInputElement>()
+
+const handleImportFile = (event: Event) => {
+    const target = event.target as HTMLInputElement
+    const file = target.files?.[0]
+    target.value = ''
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = e => {
+        if (e.target?.result) {
+            emit('import-templates', e.target.result as string)
+        }
+    }
+    reader.readAsDataURL(file)
+}
 
 const activeTab = ref<'style' | 'custom'>('style')
 const showEditor = ref(false)
@@ -161,9 +232,12 @@ const editingId = ref<string | null>(null)
 const isMobile = ref(false)
 const stylePage = ref(1)
 const form = reactive({
-    title: '',
-    description: '',
-    prompt: '',
+    name: '',
+    subject: '',
+    environment: '',
+    composition: '',
+    colorGrading: '',
+    forbidden: '',
     image: ''
 })
 const formError = ref('')
@@ -190,24 +264,6 @@ onUnmounted(() => {
 })
 
 watch(
-    () => props.selectedStyle,
-    newValue => {
-        if (newValue && activeTab.value !== 'style') {
-            activeTab.value = 'style'
-        }
-    }
-)
-
-watch(
-    () => props.customPrompt,
-    newValue => {
-        if (newValue && activeTab.value !== 'custom') {
-            activeTab.value = 'custom'
-        }
-    }
-)
-
-watch(
     () => props.templates.length,
     () => {
         stylePage.value = Math.min(stylePage.value, totalStylePages.value)
@@ -216,21 +272,28 @@ watch(
 )
 
 const selectStyle = (styleId: string) => {
-    emit('update:customPrompt', '')
+    if (props.selectedStyle !== styleId) {
+        emit('update:customPrompt', '')
+    }
     emit('update:selectedStyle', props.selectedStyle === styleId ? '' : styleId)
 }
 
 const updateCustomPrompt = (value: string) => {
-    if (value) {
+    // "自定义"标签页下这个字段是完整自定义提示词，跟"选中风格 + 特殊要求"是互斥关系，
+    // 一旦用户在这里输入内容，说明这次不走风格库，需要清空已选风格，避免被当成"特殊要求"拼进风格指令。
+    if (value && props.selectedStyle) {
         emit('update:selectedStyle', '')
     }
     emit('update:customPrompt', value)
 }
 
 const resetForm = () => {
-    form.title = ''
-    form.description = ''
-    form.prompt = ''
+    form.name = ''
+    form.subject = ''
+    form.environment = ''
+    form.composition = ''
+    form.colorGrading = ''
+    form.forbidden = ''
     form.image = ''
     formError.value = ''
 }
@@ -245,9 +308,12 @@ const openCreateForm = () => {
 const openEditForm = (template: StyleTemplate) => {
     editorMode.value = 'edit'
     editingId.value = template.id
-    form.title = template.title
-    form.description = template.description
-    form.prompt = template.prompt
+    form.name = template.name
+    form.subject = template.subject
+    form.environment = template.environment
+    form.composition = template.composition
+    form.colorGrading = template.colorGrading
+    form.forbidden = template.forbidden
     form.image = template.image
     showEditor.value = true
 }
@@ -260,19 +326,18 @@ const closeEditor = () => {
 
 const handleSubmit = () => {
     formError.value = ''
-    if (!form.title.trim()) {
-        formError.value = '模板名称不能为空'
-        return
-    }
-    if (!form.prompt.trim()) {
-        formError.value = '提示词不能为空'
+    if (!form.name.trim()) {
+        formError.value = '风格名称不能为空'
         return
     }
     const payload = {
         id: editingId.value || '',
-        title: form.title,
-        description: form.description,
-        prompt: form.prompt,
+        name: form.name,
+        subject: form.subject,
+        environment: form.environment,
+        composition: form.composition,
+        colorGrading: form.colorGrading,
+        forbidden: form.forbidden,
         image: form.image
     }
     if (editorMode.value === 'create') {

@@ -1,6 +1,8 @@
+export type GenerateMode = 'standard' | 'brand'
+
 export interface GenerateRequest {
     configId: string
-    prompt: string
+    prompt?: string
     images: string[]
     model?: string
     aspectRatio?: string
@@ -11,6 +13,9 @@ export interface GenerateRequest {
     background?: 'auto' | 'opaque' | 'transparent'
     size?: string
     includeImageData?: boolean
+    styleId?: string
+    specialRequirements?: string
+    mode?: GenerateMode
 }
 
 export type GenerateTaskStatus = 'queued' | 'running' | 'saving' | 'done' | 'failed' | 'canceled'
@@ -41,6 +46,8 @@ export interface GenerateTask {
         size?: string
         promptLength?: number
         imagesCount?: number
+        mode?: GenerateMode
+        styleId?: string
     }
     result?: GenerateTaskResult | null
 }
@@ -70,10 +77,13 @@ export interface ModelOption {
 
 export interface StyleTemplate {
     id: string
-    title: string
-    prompt: string
+    name: string
+    subject: string
+    environment: string
+    composition: string
+    colorGrading: string
+    forbidden: string
     image: string
-    description: string
 }
 
 export interface ApiConfigSummary {
@@ -118,6 +128,8 @@ export interface GalleryEntry {
     modelId?: string
     aspectRatio?: string
     imageSize?: string
+    mode?: GenerateMode
+    styleId?: string
     createdAt: string
 }
 

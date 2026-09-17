@@ -167,6 +167,30 @@
 
                 <div v-if="viewMode === 'workspace' && workspaceMode === 'image'" class="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 mb-6 lg:items-start">
                     <BaseCard title="🖼 图文生图 · 上传参考" class="h-full flex flex-col">
+                        <template #header>
+                            <div class="flex bg-dark-bg rounded-lg p-1 border border-dark-border">
+                                <button
+                                    type="button"
+                                    @click="generateMode = 'standard'"
+                                    :class="[
+                                        'py-1 px-3 rounded-md font-bold transition-all text-xs',
+                                        generateMode === 'standard' ? 'bg-dark-surfaceHighlight text-dark-text shadow-sm' : 'text-dark-muted hover:text-dark-text'
+                                    ]"
+                                >
+                                    标准模式
+                                </button>
+                                <button
+                                    type="button"
+                                    @click="generateMode = 'brand'"
+                                    :class="[
+                                        'py-1 px-3 rounded-md font-bold transition-all text-xs',
+                                        generateMode === 'brand' ? 'bg-amber-500 text-white shadow-sm' : 'text-dark-muted hover:text-dark-text'
+                                    ]"
+                                >
+                                    品牌模式
+                                </button>
+                            </div>
+                        </template>
                         <div class="flex-1">
                             <ImageUpload v-model="selectedImages" />
                         </div>
@@ -181,6 +205,8 @@
                                 @create-template="handleCreateTemplate"
                                 @update-template="handleUpdateTemplate"
                                 @delete-template="handleDeleteTemplate"
+                                @export-templates="handleExportTemplates"
+                                @import-templates="handleImportTemplates"
                             />
                         </div>
                     </BaseCard>
@@ -204,6 +230,7 @@
                                 v-model:imageSize="gemini3ImageSize"
                                 v-model:enableGoogleSearch="gemini3EnableGoogleSearch"
                                 :show-google-search="showGoogleSearchConfig"
+                                :disabled="workspaceMode === 'image' && generateMode === 'brand'"
                             />
                         </BaseCard>
                     </div>
@@ -214,6 +241,7 @@
                                 v-model:imageSize="openAIResolutionTier"
                                 v-model:quality="openAIImageQuality"
                                 v-model:outputFormat="openAIOutputFormat"
+                                :disabled="workspaceMode === 'image' && generateMode === 'brand'"
                             />
                         </BaseCard>
                     </div>
@@ -330,6 +358,7 @@ import {
     deleteApiConfig as deleteApiConfigRequest,
     deleteGalleryEntry as deleteGalleryEntryRequest,
     deleteTemplate as deleteTemplateRequest,
+    exportTemplates,
     fetchApiConfigs,
     fetchGallery,
     fetchGenerateTask,
@@ -337,6 +366,7 @@ import {
     fetchTasks,
     fetchModels,
     fetchTemplates,
+    importTemplates,
     login,
     setDefaultApiConfig as setDefaultApiConfigRequest,
     subscribeGenerateTaskEvents,
@@ -433,6 +463,7 @@ const activeTaskMode = ref<'text' | 'image' | null>(null)
 const imageTaskHint = ref<string | null>(null)
 const textTaskHint = ref<string | null>(null)
 
+const generateMode = ref<'standard' | 'brand'>('standard')
 const selectedAspectRatio = ref('1:1')
 const gemini3ImageSize = ref('2K')
 const gemini3EnableGoogleSearch = ref(false)
@@ -481,6 +512,16 @@ watch(
     () => {
         if (textToImageError.value) {
             textToImageError.value = null
+        }
+    }
+)
+
+watch(
+    () => generateMode.value,
+    mode => {
+        if (mode === 'brand') {
+            gemini3ImageSize.value = '4K'
+            openAIResolutionTier.value = '4K'
         }
     }
 )
@@ -1286,20 +1327,18 @@ const buildModelLabel = (model: ApiModel): string => {
     return lastSegment || model.id
 }
 
-const buildPrompt = () => {
-    if (selectedStyle.value) {
-        return templates.value.find(template => template.id === selectedStyle.value)?.prompt || customPrompt.value
-    }
-    return customPrompt.value
-}
+type GenerateContent = { styleId: string; specialRequirements?: string } | { prompt: string }
 
-const buildGeneratePayload = (prompt: string, images: string[]) => {
+const buildGeneratePayload = (content: GenerateContent, images: string[], mode: 'standard' | 'brand' = 'standard') => {
     const model = selectedModelId.value || selectedConfig.value?.model || DEFAULT_MODEL_ID
     const payload = {
         configId: selectedConfigId.value || '',
-        prompt,
+        ...('styleId' in content
+            ? { styleId: content.styleId, specialRequirements: content.specialRequirements || undefined }
+            : { prompt: content.prompt }),
         images,
         model,
+        mode,
         aspectRatio: showAspectRatioSelector.value ? selectedAspectRatio.value : undefined,
         imageSize: showImageSizeConfig.value ? gemini3ImageSize.value : undefined,
         enableGoogleSearch: showGoogleSearchConfig.value ? gemini3EnableGoogleSearch.value : undefined
@@ -1322,14 +1361,16 @@ const buildGeneratePayload = (prompt: string, images: string[]) => {
 
 const handleTextToImageGenerate = async () => {
     if (!canGenerateTextImage.value || !authToken.value) return
-    const request = buildGeneratePayload(textToImagePrompt.value, [])
+    const request = buildGeneratePayload({ prompt: textToImagePrompt.value }, [], 'standard')
     await runGenerateTask(request, 'text')
 }
 
 const handleGenerate = async () => {
     if (!canGenerate.value || !authToken.value) return
-    const prompt = buildPrompt()
-    const request = buildGeneratePayload(prompt, selectedImages.value)
+    const content: GenerateContent = selectedStyle.value
+        ? { styleId: selectedStyle.value, specialRequirements: customPrompt.value.trim() || undefined }
+        : { prompt: customPrompt.value }
+    const request = buildGeneratePayload(content, selectedImages.value, generateMode.value)
     await runGenerateTask(request, 'image')
 }
 
@@ -1403,6 +1444,38 @@ const handleDeleteTemplate = async (id: string) => {
         showNotice('success', '模板已删除')
     } catch (error) {
         const message = error instanceof Error ? error.message : '删除模板失败'
+        showNotice('error', message)
+    }
+}
+
+const handleExportTemplates = async () => {
+    if (!authToken.value) return
+    try {
+        const blob = await exportTemplates(authToken.value)
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `风格库-${Date.now()}.xlsx`
+        link.rel = 'noopener'
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(url)
+        showNotice('success', '风格库已导出')
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '导出失败'
+        showNotice('error', message)
+    }
+}
+
+const handleImportTemplates = async (fileBase64: string) => {
+    if (!authToken.value) return
+    try {
+        const data = await importTemplates(authToken.value, fileBase64)
+        await loadTemplates()
+        showNotice('success', `导入完成：新增 ${data.created} 条，更新 ${data.updated} 条`)
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '导入失败'
         showNotice('error', message)
     }
 }

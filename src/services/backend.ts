@@ -113,6 +113,26 @@ export async function deleteTemplate(token: string, id: string) {
     return data.template
 }
 
+export async function exportTemplates(token: string): Promise<Blob> {
+    const response = await fetch(`${getApiBaseUrl()}/api/templates/export`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` }
+    })
+    if (!response.ok) {
+        const message = await extractErrorMessage(response)
+        throw new Error(message)
+    }
+    return response.blob()
+}
+
+export async function importTemplates(token: string, fileBase64: string) {
+    return request<{ templates: StyleTemplate[]; created: number; updated: number }>(
+        '/api/templates/import',
+        { method: 'POST', body: JSON.stringify({ fileBase64 }) },
+        token
+    )
+}
+
 export async function fetchModels(token: string, configId: string) {
     const data = await request<{ models: ApiModel[] }>(`/api/api-configs/${configId}/models`, { method: 'GET' }, token)
     return data.models || []

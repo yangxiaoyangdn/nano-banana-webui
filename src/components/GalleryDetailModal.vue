@@ -12,6 +12,10 @@
                     </div>
                     <div class="grid md:grid-cols-2 gap-6 text-sm">
                         <div class="space-y-3 bg-dark-bg p-4 rounded-xl border border-dark-border">
+                            <p class="text-dark-muted flex justify-between items-center">
+                                <span>🏷️ 出图模式</span>
+                                <span :class="['text-xs font-bold px-2 py-0.5 rounded-full', modeBadgeClass(entry.mode)]">{{ modeLabel(entry.mode) }}</span>
+                            </p>
                             <p class="text-dark-muted flex justify-between"><span>🕒 生图时间</span> <span class="font-bold text-dark-text">{{ formatDate(entry.createdAt) }}</span></p>
                             <p class="text-dark-muted flex justify-between"><span>🔑 使用 API</span> <span class="font-bold text-dark-text">{{ entry.configLabel }}</span></p>
                             <p class="text-dark-muted flex justify-between"><span>🧠 使用模型</span> <span class="font-bold text-dark-text">{{ entry.modelId || '未记录' }}</span></p>
@@ -55,6 +59,10 @@ const props = defineProps<{
 defineEmits<{
     close: []
 }>()
+
+const modeLabel = (mode?: string) => (mode === 'brand' ? '品牌模式' : '标准模式')
+const modeBadgeClass = (mode?: string) =>
+    mode === 'brand' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' : 'bg-dark-bg text-dark-muted border border-dark-border'
 
 const formatDate = (value: string) => {
     try {

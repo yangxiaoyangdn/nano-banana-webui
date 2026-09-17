@@ -36,7 +36,10 @@
                 <div class="p-3 sm:p-4 flex flex-col gap-2 flex-1">
                     <div class="text-xs text-dark-muted flex items-center justify-between gap-2">
                         <span>🕒 {{ formatDate(item.createdAt) }}</span>
-                        <span class="font-semibold text-dark-text bg-dark-bg px-2 py-0.5 rounded-full text-[10px] truncate max-w-[100px]">{{ item.configLabel }}</span>
+                        <div class="flex items-center gap-1">
+                            <span :class="['text-[10px] font-bold px-2 py-0.5 rounded-full', modeBadgeClass(item.mode)]">{{ modeLabel(item.mode) }}</span>
+                            <span class="font-semibold text-dark-text bg-dark-bg px-2 py-0.5 rounded-full text-[10px] truncate max-w-[100px]">{{ item.configLabel }}</span>
+                        </div>
                     </div>
                     <p
                         class="text-sm font-bold text-dark-text line-clamp-2 group-hover:text-dark-accent transition-colors cursor-pointer"
@@ -108,6 +111,10 @@ defineEmits<{
     'delete-entry': [id: string]
     'show-detail': [entry: GalleryEntry]
 }>()
+
+const modeLabel = (mode?: string) => (mode === 'brand' ? '品牌' : '标准')
+const modeBadgeClass = (mode?: string) =>
+    mode === 'brand' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' : 'bg-dark-bg text-dark-muted border border-dark-border'
 
 const handleImageError = (event: Event, item: GalleryEntry) => {
     const target = event.target as HTMLImageElement

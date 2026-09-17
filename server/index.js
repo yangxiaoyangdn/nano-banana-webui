@@ -8,7 +8,9 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { v4 as uuid } from 'uuid'
 import sharp from 'sharp'
+import XLSX from 'xlsx'
 import { isOpenAIImageModel, normalizeModelId, supportsGoogleSearch, supportsImageSize } from '../src/shared/modelCapabilities.js'
+import { assembleStyleInstruction } from '../src/shared/instructionAssembly.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -411,7 +413,9 @@ function createTaskState({ requestId, token, payload }) {
             background: payload.background || '',
             size: payload.size || '',
             promptLength: typeof payload.prompt === 'string' ? payload.prompt.length : 0,
-            imagesCount: Array.isArray(payload.images) ? payload.images.length : 0
+            imagesCount: Array.isArray(payload.images) ? payload.images.length : 0,
+            mode: payload.mode || 'standard',
+            styleId: payload.styleId || ''
         },
         result: null
     }
@@ -546,7 +550,9 @@ async function runTask(taskId) {
                 configId: apiConfig.id,
                 modelId: result.modelUsed,
                 aspectRatio: result.aspectRatioUsed,
-                imageSize: result.imageSizeUsed
+                imageSize: result.imageSizeUsed,
+                mode: task.rawPayload.mode || 'standard',
+                styleId: task.rawPayload.styleId || ''
             },
             task.requestId,
             { includeImageData: false },
@@ -597,6 +603,95 @@ async function saveGallery(entries) {
 function sanitizeConfig(apiConfig) {
     const { apiKey, ...rest } = apiConfig
     return rest
+}
+
+// 风格库六字段：风格名称/主体特征/环境基调/构图规则/色彩分级/禁用项。
+// 兼容旧版 {title,prompt,description} 扁平模板：整段 prompt 迁移进"主体特征"，避免历史数据丢失。
+function normalizeStyleTemplate(raw) {
+    if (!raw) return raw
+    const isLegacyShape = typeof raw.prompt === 'string' && raw.subject === undefined
+    if (isLegacyShape) {
+        return {
+            id: raw.id,
+            name: raw.title || '',
+            subject: raw.prompt || '',
+            environment: '',
+            composition: '',
+            colorGrading: '',
+            forbidden: '',
+            image: raw.image || ''
+        }
+    }
+    return {
+        id: raw.id,
+        name: raw.name || '',
+        subject: raw.subject || '',
+        environment: raw.environment || '',
+        composition: raw.composition || '',
+        colorGrading: raw.colorGrading || '',
+        forbidden: raw.forbidden || '',
+        image: raw.image || ''
+    }
+}
+
+// 风格库 Excel 导出/导入：列名与团队线下模板保持一致，Excel 只是临时编辑载体。
+const STYLE_EXPORT_HEADERS = ['风格名称', '主体特征', '环境基调', '构图规则', '色彩分级', '禁用项']
+const STYLE_FIELD_BY_HEADER = {
+    风格名称: 'name',
+    主体特征: 'subject',
+    环境基调: 'environment',
+    构图规则: 'composition',
+    色彩分级: 'colorGrading',
+    禁用项: 'forbidden'
+}
+
+function buildStyleWorkbook(templates) {
+    const rows = templates.map(template => ({
+        风格名称: template.name || '',
+        主体特征: template.subject || '',
+        环境基调: template.environment || '',
+        构图规则: template.composition || '',
+        色彩分级: template.colorGrading || '',
+        禁用项: template.forbidden || ''
+    }))
+    const worksheet = XLSX.utils.json_to_sheet(rows, { header: STYLE_EXPORT_HEADERS })
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, '风格库')
+    return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })
+}
+
+// 团队线下模板首行是标题、第二行是填写说明，真正的列头（风格名称...）在第三行才出现，
+// 所以先按原始网格读取，定位包含"风格名称"的那一行作为表头，再按表头文字取值，
+// 而不是假设第一行就是表头——这样无论表头前有几行说明文字都能正确解析。
+function parseStyleWorkbook(buffer) {
+    const workbook = XLSX.read(buffer, { type: 'buffer' })
+    const sheetName = workbook.SheetNames[0]
+    if (!sheetName) return []
+    const sheet = workbook.Sheets[sheetName]
+    const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+
+    const headerRowIndex = grid.findIndex(row => Array.isArray(row) && row.some(cell => String(cell || '').trim() === '风格名称'))
+    if (headerRowIndex === -1) return []
+
+    const headerRow = grid[headerRowIndex].map(cell => String(cell || '').trim())
+    const columnIndexByField = {}
+    headerRow.forEach((header, index) => {
+        const field = STYLE_FIELD_BY_HEADER[header]
+        if (field) columnIndexByField[field] = index
+    })
+
+    const records = []
+    for (let i = headerRowIndex + 1; i < grid.length; i++) {
+        const row = grid[i]
+        if (!row) continue
+        const record = {}
+        for (const [field, index] of Object.entries(columnIndexByField)) {
+            const value = row[index]
+            record[field] = typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+        }
+        if (record.name) records.push(record)
+    }
+    return records
 }
 
 function authMiddleware(req, res, next) {
@@ -837,7 +932,7 @@ app.get('/api/logs/events', authMiddleware, (req, res) => {
 app.get('/api/templates', authMiddleware, async (req, res) => {
     try {
         const config = await loadConfig()
-        const templates = config.templates || []
+        const templates = (config.templates || []).map(normalizeStyleTemplate)
         logInfo('模板', `读取模板成功，共 ${templates.length} 条`, null, req.requestId)
         res.json({ templates })
     } catch (error) {
@@ -848,24 +943,27 @@ app.get('/api/templates', authMiddleware, async (req, res) => {
 
 app.post('/api/templates', authMiddleware, async (req, res) => {
     const template = req.body
-    if (!template?.title || !template?.prompt) {
-        return res.status(400).json({ message: '模板标题和提示词不能为空' })
+    if (!template?.name) {
+        return res.status(400).json({ message: '风格名称不能为空' })
     }
 
     try {
         const config = await loadConfig()
-        const templates = config.templates || []
+        const templates = (config.templates || []).map(normalizeStyleTemplate)
         const newTemplate = {
             id: template.id || uuid(),
-            title: template.title,
-            prompt: template.prompt,
-            description: template.description || '',
+            name: template.name,
+            subject: template.subject || '',
+            environment: template.environment || '',
+            composition: template.composition || '',
+            colorGrading: template.colorGrading || '',
+            forbidden: template.forbidden || '',
             image: template.image || ''
         }
         templates.push(newTemplate)
         config.templates = templates
         await saveConfig(config)
-        logInfo('模板', `已新增模板 ${newTemplate.id}`, { title: newTemplate.title }, req.requestId)
+        logInfo('模板', `已新增模板 ${newTemplate.id}`, { name: newTemplate.name }, req.requestId)
         res.json({ template: newTemplate })
     } catch (error) {
         logError('模板', '新增模板失败', error, req.requestId)
@@ -876,22 +974,26 @@ app.post('/api/templates', authMiddleware, async (req, res) => {
 app.put('/api/templates/:id', authMiddleware, async (req, res) => {
     try {
         const config = await loadConfig()
-        const templates = config.templates || []
+        const templates = (config.templates || []).map(normalizeStyleTemplate)
         const index = templates.findIndex(item => item.id === req.params.id)
         if (index === -1) {
             return res.status(404).json({ message: '模板不存在' })
         }
         const payload = req.body || {}
+        const current = templates[index]
         templates[index] = {
-            ...templates[index],
-            title: payload.title || templates[index].title,
-            prompt: payload.prompt || templates[index].prompt,
-            description: payload.description ?? templates[index].description,
-            image: payload.image ?? templates[index].image
+            ...current,
+            name: payload.name !== undefined ? payload.name : current.name,
+            subject: payload.subject !== undefined ? payload.subject : current.subject,
+            environment: payload.environment !== undefined ? payload.environment : current.environment,
+            composition: payload.composition !== undefined ? payload.composition : current.composition,
+            colorGrading: payload.colorGrading !== undefined ? payload.colorGrading : current.colorGrading,
+            forbidden: payload.forbidden !== undefined ? payload.forbidden : current.forbidden,
+            image: payload.image !== undefined ? payload.image : current.image
         }
         config.templates = templates
         await saveConfig(config)
-        logInfo('模板', `已更新模板 ${templates[index].id}`, { title: templates[index].title }, req.requestId)
+        logInfo('模板', `已更新模板 ${templates[index].id}`, { name: templates[index].name }, req.requestId)
         res.json({ template: templates[index] })
     } catch (error) {
         logError('模板', '更新模板失败', error, req.requestId)
@@ -902,7 +1004,7 @@ app.put('/api/templates/:id', authMiddleware, async (req, res) => {
 app.delete('/api/templates/:id', authMiddleware, async (req, res) => {
     try {
         const config = await loadConfig()
-        const templates = config.templates || []
+        const templates = (config.templates || []).map(normalizeStyleTemplate)
         const index = templates.findIndex(item => item.id === req.params.id)
         if (index === -1) {
             return res.status(404).json({ message: '模板不存在' })
@@ -910,11 +1012,64 @@ app.delete('/api/templates/:id', authMiddleware, async (req, res) => {
         const removed = templates.splice(index, 1)[0]
         config.templates = templates
         await saveConfig(config)
-        logInfo('模板', `已删除模板 ${removed.id}`, { title: removed.title }, req.requestId)
+        logInfo('模板', `已删除模板 ${removed.id}`, { name: removed.name }, req.requestId)
         res.json({ template: removed })
     } catch (error) {
         logError('模板', '删除模板失败', error, req.requestId)
         res.status(500).json({ message: '无法删除模板' })
+    }
+})
+
+app.get('/api/templates/export', authMiddleware, async (req, res) => {
+    try {
+        const config = await loadConfig()
+        const templates = (config.templates || []).map(normalizeStyleTemplate)
+        const buffer = buildStyleWorkbook(templates)
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        res.setHeader('Content-Disposition', 'attachment; filename="style-library.xlsx"')
+        logInfo('模板', `导出风格库 Excel，共 ${templates.length} 条`, null, req.requestId)
+        res.send(buffer)
+    } catch (error) {
+        logError('模板', '导出风格库失败', error, req.requestId)
+        res.status(500).json({ message: '导出失败' })
+    }
+})
+
+app.post('/api/templates/import', authMiddleware, async (req, res) => {
+    const { fileBase64 } = req.body || {}
+    if (!fileBase64 || typeof fileBase64 !== 'string') {
+        return res.status(400).json({ message: '缺少文件内容' })
+    }
+
+    try {
+        const base64Data = fileBase64.includes(',') ? fileBase64.split(',').pop() : fileBase64
+        const buffer = Buffer.from(base64Data, 'base64')
+        const rows = parseStyleWorkbook(buffer)
+        if (!rows.length) {
+            return res.status(400).json({ message: '未解析到有效数据，请确认"风格名称"列已填写' })
+        }
+
+        const config = await loadConfig()
+        const templates = (config.templates || []).map(normalizeStyleTemplate)
+        let created = 0
+        let updated = 0
+        for (const row of rows) {
+            const existing = templates.find(item => item.name === row.name)
+            if (existing) {
+                Object.assign(existing, row)
+                updated += 1
+            } else {
+                templates.push({ id: uuid(), image: '', ...row })
+                created += 1
+            }
+        }
+        config.templates = templates
+        await saveConfig(config)
+        logInfo('模板', `导入风格库 Excel：新增 ${created} 条，更新 ${updated} 条`, null, req.requestId)
+        res.json({ templates, created, updated })
+    } catch (error) {
+        logError('模板', '导入风格库失败', error, req.requestId)
+        res.status(400).json({ message: '文件解析失败，请确认文件格式是否正确' })
     }
 })
 
@@ -935,6 +1090,24 @@ app.post('/api/generate/task', authMiddleware, async (req, res) => {
     if (!payload.configId) {
         return res.status(400).json({ message: '必须指定 API 配置' })
     }
+
+    // 模块③指令组装：选中风格时，用风格库六字段按"主体→环境→构图→风格→特殊要求"拼装最终提示词，
+    // 而不是直接使用前端传来的整段 prompt。未选风格（纯自定义提示词/文生图）则保持原样。
+    if (payload.styleId) {
+        try {
+            const config = await loadConfig()
+            const templates = (config.templates || []).map(normalizeStyleTemplate)
+            const style = templates.find(item => item.id === payload.styleId)
+            if (!style) {
+                return res.status(400).json({ message: '找不到所选风格，请重新选择' })
+            }
+            payload.prompt = assembleStyleInstruction(style, payload.specialRequirements)
+        } catch (error) {
+            logError('生成', '指令组装失败', error, req.requestId)
+            return res.status(500).json({ message: '指令组装失败，请稍后重试' })
+        }
+    }
+
     const payloadError = validateGeneratePayload(payload)
     if (payloadError) {
         return res.status(400).json({ message: payloadError })
@@ -951,7 +1124,9 @@ app.post('/api/generate/task', authMiddleware, async (req, res) => {
             outputFormat: payload.outputFormat || '',
             quality: payload.quality || '',
             background: payload.background || '',
-            size: payload.size || ''
+            size: payload.size || '',
+            mode: payload.mode || 'standard',
+            styleId: payload.styleId || ''
         }
         logInfo('生成', '收到生成任务请求', summary, req.requestId)
         const task = createTaskState({ requestId: req.requestId, token: '', payload })
@@ -1682,7 +1857,7 @@ function filterTextResponse(text) {
 }
 
 async function persistGalleryEntry(
-    { prompt, responseText, imageSource, imageCandidates, configLabel, configId, modelId, aspectRatio, imageSize },
+    { prompt, responseText, imageSource, imageCandidates, configLabel, configId, modelId, aspectRatio, imageSize, mode, styleId },
     requestId,
     { includeImageData } = { includeImageData: false },
     onStage
@@ -1709,6 +1884,8 @@ async function persistGalleryEntry(
         modelId: modelId || '',
         aspectRatio: aspectRatio || '',
         imageSize: imageSize || '',
+        mode: mode || 'standard',
+        styleId: styleId || '',
         createdAt: new Date().toISOString()
     }
     entries.unshift(entry)

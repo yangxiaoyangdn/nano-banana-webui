@@ -38,6 +38,9 @@
                             <span :class="statusClass(item.status)" class="text-xs font-bold px-2 py-0.5 rounded-full border">
                                 {{ statusLabel(item.status) }}
                             </span>
+                            <span :class="['text-xs font-bold px-2 py-0.5 rounded-full border', modeBadgeClass(item.payload?.mode)]">
+                                {{ modeLabel(item.payload?.mode) }}
+                            </span>
                             <span v-if="item.stage" class="text-xs text-dark-muted">阶段：{{ item.stage }}</span>
                             <span v-if="item.payload?.model" class="text-xs text-dark-muted">模型：{{ item.payload.model }}</span>
                         </div>
@@ -150,6 +153,10 @@ const statusClass = (status: string) => {
     if (status === 'running' || status === 'saving') return 'border-blue-500/40 text-blue-300 bg-blue-500/10'
     return 'border-dark-border text-dark-muted bg-dark-bg/50'
 }
+
+const modeLabel = (mode?: string) => (mode === 'brand' ? '品牌' : '标准')
+const modeBadgeClass = (mode?: string) =>
+    mode === 'brand' ? 'border-amber-500/40 text-amber-400 bg-amber-500/10' : 'border-dark-border text-dark-muted bg-dark-bg/50'
 
 const formatTime = (value: string) => {
     try {

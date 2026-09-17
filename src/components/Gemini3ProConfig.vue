@@ -7,13 +7,16 @@
             </label>
             <select
                 :value="imageSize"
+                :disabled="disabled"
                 @change="$emit('update:imageSize', ($event.target as HTMLInputElement).value)"
                 class="modern-input"
+                :class="{ 'opacity-60 cursor-not-allowed': disabled }"
             >
                 <option value="1K">1K - 标准清晰度</option>
                 <option value="2K">2K - 高清晰度</option>
                 <option value="4K">4K - 超高清晰度</option>
             </select>
+            <p v-if="disabled" class="text-xs text-amber-400 mt-1">🔒 品牌模式自动锁定为高精度（4K）</p>
         </div>
 
         <div v-if="showGoogleSearch">
@@ -44,6 +47,7 @@ defineProps<{
     imageSize: string
     enableGoogleSearch: boolean
     showGoogleSearch?: boolean
+    disabled?: boolean
 }>()
 
 defineEmits<{
