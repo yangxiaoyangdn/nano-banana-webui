@@ -41,6 +41,13 @@
             <div v-for="(thumbnail, index) in thumbnails" :key="index" class="relative aspect-square bg-dark-bg rounded-lg overflow-hidden group border border-dark-border">
                 <img :src="thumbnail" :alt="`Image ${index + 1}`" class="w-full h-full object-cover" />
                 <button
+                    @click="emit('edit', index)"
+                    class="absolute bottom-1 left-1 w-6 h-6 bg-dark-surface/90 text-dark-text rounded-full flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity hover:bg-dark-accent hover:text-white shadow-md"
+                    title="编辑"
+                >
+                    🖌️
+                </button>
+                <button
                     @click="removeThumbnail(index)"
                     class="absolute top-1 right-1 w-6 h-6 bg-dark-danger text-white rounded-full flex items-center justify-center text-sm font-bold opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600 shadow-md"
                 >
@@ -60,6 +67,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
     'update:modelValue': [value: string[]]
+    edit: [index: number]
 }>()
 
 const fileInput = ref<HTMLInputElement>()

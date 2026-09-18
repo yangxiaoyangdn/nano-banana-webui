@@ -23,14 +23,19 @@
                         <div class="space-y-3 bg-dark-bg p-4 rounded-xl border border-dark-border">
                             <p class="text-dark-muted flex justify-between"><span>📐 画幅比</span> <span class="font-bold text-dark-text">{{ entry.aspectRatio || '未记录' }}</span></p>
                             <p class="text-dark-muted flex justify-between"><span>🖼️ 分辨率</span> <span class="font-bold text-dark-text">{{ entry.imageSize || '未记录' }}</span></p>
-                            <BaseButton
-                                @click="download(entry.imagePath)"
-                                variant="primary"
-                                block
-                                icon="⬇️"
-                            >
-                                下载原图
-                            </BaseButton>
+                            <div class="flex gap-2">
+                                <BaseButton
+                                    @click="download(entry.imagePath)"
+                                    variant="primary"
+                                    block
+                                    icon="⬇️"
+                                >
+                                    下载原图
+                                </BaseButton>
+                                <BaseButton @click="$emit('edit-image')" variant="secondary" block icon="🖌️">
+                                    编辑
+                                </BaseButton>
+                            </div>
                         </div>
                     </div>
                     <div>
@@ -114,6 +119,7 @@ const props = defineProps<{
 const emit = defineEmits<{
     close: []
     review: [payload: { id: string; status: 'approved' | 'rejected' | 'pending'; rejectReason?: string; note?: string }]
+    'edit-image': []
 }>()
 
 const showRejectForm = ref(false)

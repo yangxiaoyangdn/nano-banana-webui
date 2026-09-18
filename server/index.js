@@ -514,7 +514,8 @@ async function runTask(taskId) {
                 outputFormat: task.rawPayload.outputFormat,
                 quality: task.rawPayload.quality,
                 background: task.rawPayload.background,
-                size: task.rawPayload.size
+                size: task.rawPayload.size,
+                maskImage: task.rawPayload.maskImage
             },
             task.requestId,
             abortController.signal
@@ -822,6 +823,44 @@ app.post('/api/login', async (req, res) => {
 
 app.get('/api/session', authMiddleware, (req, res) => {
     res.json({ ok: true })
+})
+
+// 模块⑧权限细化：网页内直接改登录密码，不用再去改 app.config.json 文件。
+app.post('/api/account/password', authMiddleware, async (req, res) => {
+    const { currentPassword, newPassword } = req.body || {}
+    if (!currentPassword || !newPassword) {
+        return res.status(400).json({ message: '当前密码和新密码都不能为空' })
+    }
+    if (typeof newPassword !== 'string' || newPassword.length < 6) {
+        return res.status(400).json({ message: '新密码至少需要 6 位' })
+    }
+
+    try {
+        const config = await loadConfig()
+        const authConfig = config.auth || {}
+
+        let isValid = false
+        if (authConfig.passwordHash) {
+            isValid = await bcrypt.compare(currentPassword, authConfig.passwordHash)
+        } else if (authConfig.password) {
+            isValid = currentPassword === authConfig.password
+        }
+        if (!isValid) {
+            return res.status(401).json({ message: '当前密码不正确' })
+        }
+
+        config.auth = {
+            ...authConfig,
+            passwordHash: await bcrypt.hash(newPassword, 10),
+            password: ''
+        }
+        await saveConfig(config)
+        logInfo('账号', '登录密码已更新', null, req.requestId)
+        res.json({ ok: true })
+    } catch (error) {
+        logError('账号', '修改密码失败', error, req.requestId)
+        res.status(500).json({ message: '修改密码失败，请稍后重试' })
+    }
 })
 
 app.get('/api/api-configs', authMiddleware, async (req, res) => {
@@ -1600,7 +1639,7 @@ function resolveOpenAIImageEndpoint(endpoint, mode) {
     }
 }
 
-async function generateImage({ apiConfig, prompt, images, model, aspectRatio, imageSize, enableGoogleSearch, outputFormat, quality, background, size }, requestId, signal) {
+async function generateImage({ apiConfig, prompt, images, model, aspectRatio, imageSize, enableGoogleSearch, outputFormat, quality, background, size, maskImage }, requestId, signal) {
     if (!prompt && (!images || !images.length)) {
         throw new Error('缺少提示词或参考图像')
     }
@@ -1617,7 +1656,8 @@ async function generateImage({ apiConfig, prompt, images, model, aspectRatio, im
                 outputFormat: outputFormat || 'png',
                 quality: quality || 'auto',
                 background: background || 'auto',
-                size: size || 'auto'
+                size: size || 'auto',
+                maskImage
             },
             requestId,
             signal
@@ -1638,7 +1678,7 @@ async function generateImage({ apiConfig, prompt, images, model, aspectRatio, im
     )
 }
 
-async function generateOpenAIImage({ apiConfig, prompt, images, model, outputFormat, quality, background, size }, requestId, signal) {
+async function generateOpenAIImage({ apiConfig, prompt, images, model, outputFormat, quality, background, size, maskImage }, requestId, signal) {
     const mode = images.length ? 'edit' : 'generation'
     const endpoint = resolveOpenAIImageEndpoint(apiConfig.endpoint, mode)
     const commonFields = {
@@ -1654,7 +1694,7 @@ async function generateOpenAIImage({ apiConfig, prompt, images, model, outputFor
     }
 
     const requestOptions = images.length
-        ? await buildOpenAIImageEditRequest(commonFields, images, apiConfig.apiKey, signal)
+        ? await buildOpenAIImageEditRequest(commonFields, images, apiConfig.apiKey, signal, maskImage)
         : {
               method: 'POST',
               headers: {
@@ -1700,7 +1740,7 @@ async function generateOpenAIImage({ apiConfig, prompt, images, model, outputFor
     }
 }
 
-async function buildOpenAIImageEditRequest(fields, images, apiKey, signal) {
+async function buildOpenAIImageEditRequest(fields, images, apiKey, signal, maskImage) {
     const form = new FormData()
     Object.entries(fields).forEach(([key, value]) => {
         if (value !== undefined && value !== null && value !== '') {
@@ -1711,6 +1751,13 @@ async function buildOpenAIImageEditRequest(fields, images, apiKey, signal) {
     for (let index = 0; index < images.length; index++) {
         const file = await createImageUploadFile(images[index], index)
         form.append('image[]', file.blob, file.fileName)
+    }
+
+    // 模块⑨图片编辑：涂抹标记区域生成的透明蒙版，白色/不透明部分是要被智能去除并重绘的区域，
+    // 只有 OpenAI 系图像模型的 images/edits 接口支持真正的 mask 语义。
+    if (maskImage) {
+        const maskFile = await createImageUploadFile(maskImage, 0)
+        form.append('mask', maskFile.blob, 'mask.png')
     }
 
     return {
@@ -2319,6 +2366,44 @@ app.patch('/api/gallery/:id/review', authMiddleware, async (req, res) => {
     } catch (error) {
         logError('审核', '更新审核状态失败', error, req.requestId)
         res.status(500).json({ message: '更新审核状态失败' })
+    }
+})
+
+// 模块⑨图片编辑-裁剪：纯前端 canvas 裁剪出结果后传回来，不需要调用 AI，
+// 直接覆盖这条图库记录的图片文件（保留 prompt/风格/审核状态等其他字段）。
+app.post('/api/gallery/:id/crop', authMiddleware, async (req, res) => {
+    const { dataUrl } = req.body || {}
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+        return res.status(400).json({ message: '裁剪结果格式不正确' })
+    }
+
+    try {
+        const entries = await loadGallery()
+        const index = entries.findIndex(entry => entry.id === req.params.id)
+        if (index === -1) {
+            return res.status(404).json({ message: '图库记录不存在' })
+        }
+        const oldEntry = entries[index]
+        const { fileName, imagePath, thumbnailPath } = await saveImagesToGallery([dataUrl], req.requestId)
+
+        if (oldEntry.fileName) {
+            const oldFilePath = path.join(GALLERY_DIR, oldEntry.fileName)
+            if (fs.existsSync(oldFilePath)) {
+                await fs.promises.unlink(oldFilePath).catch(() => null)
+            }
+            const oldThumbPath = path.join(THUMBNAILS_DIR, `thumb-${oldEntry.fileName}`)
+            if (fs.existsSync(oldThumbPath)) {
+                await fs.promises.unlink(oldThumbPath).catch(() => null)
+            }
+        }
+
+        entries[index] = { ...oldEntry, fileName, imagePath, thumbnailPath }
+        await saveGallery(entries)
+        logInfo('图库', `已裁剪替换图库记录 ${oldEntry.id}`, { fileName }, req.requestId)
+        res.json({ entry: entries[index] })
+    } catch (error) {
+        logError('图库', '裁剪保存失败', error, req.requestId)
+        res.status(500).json({ message: '裁剪保存失败' })
     }
 })
 

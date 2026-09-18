@@ -36,6 +36,9 @@
                                 >
                                     🧾 任务
                                 </BaseButton>
+                                <BaseButton @click="showPasswordModal = true" variant="secondary">
+                                    🔒 修改密码
+                                </BaseButton>
                                 <BaseButton @click="handleLogout" variant="secondary">
                                     退出登录
                                 </BaseButton>
@@ -192,7 +195,7 @@
                             </div>
                         </template>
                         <div class="flex-1">
-                            <ImageUpload v-model="selectedImages" />
+                            <ImageUpload v-model="selectedImages" @edit="openImageEditorForUpload" />
                         </div>
                     </BaseCard>
 
@@ -338,6 +341,7 @@
                         :submitting="reviewSubmitting"
                         @close="selectedGalleryEntry = null"
                         @review="handleReviewGalleryEntry"
+                        @edit-image="openImageEditorForGallery"
                     />
                 </div>
 
@@ -366,6 +370,21 @@
                     </template>
                 </div>
 
+                <ImageEditorModal
+                    :visible="editorVisible"
+                    :image-src="editorImageSrc"
+                    :submitting="editorSubmitting"
+                    @close="editorVisible = false"
+                    @confirm-crop="handleConfirmCrop"
+                    @confirm-erase="handleConfirmErase"
+                />
+
+                <ChangePasswordModal
+                    :visible="showPasswordModal"
+                    :submitting="passwordSubmitting"
+                    @close="showPasswordModal = false"
+                    @submit="handleChangePassword"
+                />
             </template>
         </div>
     </div>
@@ -381,6 +400,8 @@ import ImageUpload from './components/ImageUpload.vue'
 import StylePromptSelector from './components/StylePromptSelector.vue'
 import BatchImportPanel from './components/BatchImportPanel.vue'
 import BrandBriefPanel from './components/BrandBriefPanel.vue'
+import ImageEditorModal from './components/ImageEditorModal.vue'
+import ChangePasswordModal from './components/ChangePasswordModal.vue'
 import ResultDisplay from './components/ResultDisplay.vue'
 import AspectRatioSelector from './components/AspectRatioSelector.vue'
 import Gemini3ProConfig from './components/Gemini3ProConfig.vue'
@@ -395,6 +416,8 @@ import {
     createTemplate,
     cancelGenerateTask,
     deleteApiConfig as deleteApiConfigRequest,
+    changePassword,
+    cropGalleryEntry,
     deleteGalleryEntry as deleteGalleryEntryRequest,
     reviewGalleryEntry,
     deleteTemplate as deleteTemplateRequest,
@@ -498,6 +521,15 @@ const paginatedGalleryEntries = computed(() => {
 })
 const selectedGalleryEntry = ref<GalleryEntry | null>(null)
 const reviewSubmitting = ref(false)
+
+type EditorContext = { type: 'upload'; index: number } | { type: 'gallery'; entryId: string }
+const editorVisible = ref(false)
+const editorImageSrc = ref('')
+const editorSubmitting = ref(false)
+const editorContext = ref<EditorContext | null>(null)
+
+const showPasswordModal = ref(false)
+const passwordSubmitting = ref(false)
 
 const serverLogs = ref<ServerLogEntry[]>([])
 const logsLoading = ref(false)
@@ -1301,6 +1333,21 @@ const handleLogout = () => {
     stopLogsStream = null
 }
 
+const handleChangePassword = async (payload: { currentPassword: string; newPassword: string }) => {
+    if (!authToken.value) return
+    passwordSubmitting.value = true
+    try {
+        await changePassword(authToken.value, payload.currentPassword, payload.newPassword)
+        showPasswordModal.value = false
+        showNotice('success', '密码已更新，下次登录请使用新密码')
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '修改密码失败'
+        showNotice('error', message)
+    } finally {
+        passwordSubmitting.value = false
+    }
+}
+
 const loadAllData = async () => {
     await Promise.all([loadConfigs(), loadTemplates(), loadGallery()])
 }
@@ -1667,6 +1714,107 @@ const handleReviewGalleryEntry = async (payload: { id: string; status: 'approved
         showNotice('error', message)
     } finally {
         reviewSubmitting.value = false
+    }
+}
+
+const openImageEditorForUpload = (index: number) => {
+    const src = selectedImages.value[index]
+    if (!src) return
+    editorContext.value = { type: 'upload', index }
+    editorImageSrc.value = src
+    editorVisible.value = true
+}
+
+const openImageEditorForGallery = () => {
+    if (!selectedGalleryEntry.value) return
+    editorContext.value = { type: 'gallery', entryId: selectedGalleryEntry.value.id }
+    editorImageSrc.value = selectedGalleryEntry.value.imagePath
+    editorVisible.value = true
+}
+
+const handleConfirmCrop = async (dataUrl: string) => {
+    const context = editorContext.value
+    if (!context) return
+    if (context.type === 'upload') {
+        const next = [...selectedImages.value]
+        next[context.index] = dataUrl
+        selectedImages.value = next
+        editorVisible.value = false
+        showNotice('success', '裁剪完成')
+        return
+    }
+    if (!authToken.value) return
+    editorSubmitting.value = true
+    try {
+        const updated = await cropGalleryEntry(authToken.value, context.entryId, dataUrl)
+        const normalized = normalizeGalleryEntry(updated)
+        galleryEntries.value = galleryEntries.value.map(entry => (entry.id === normalized.id ? normalized : entry))
+        if (selectedGalleryEntry.value?.id === normalized.id) {
+            selectedGalleryEntry.value = normalized
+        }
+        editorVisible.value = false
+        showNotice('success', '裁剪完成')
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '裁剪保存失败'
+        showNotice('error', message)
+    } finally {
+        editorSubmitting.value = false
+    }
+}
+
+const pollEditTaskUntilDone = async (taskId: string): Promise<GalleryEntry> => {
+    const deadline = Date.now() + 5 * 60 * 1000
+    while (true) {
+        const task = await fetchGenerateTask(authToken.value as string, taskId)
+        if (task.status === 'done' && task.result?.galleryEntry) {
+            return task.result.galleryEntry
+        }
+        if (task.status === 'failed') throw new Error(task.error || '编辑失败')
+        if (task.status === 'canceled') throw new Error('任务已取消')
+        if (Date.now() > deadline) throw new Error('编辑超时')
+        await sleep(2000)
+    }
+}
+
+const handleConfirmErase = async (payload: { annotatedDataUrl: string; maskDataUrl: string }) => {
+    const context = editorContext.value
+    if (!context || !authToken.value || !selectedConfigId.value) return
+
+    const originalImage =
+        context.type === 'upload' ? selectedImages.value[context.index] : withServerBase(editorImageSrc.value)
+    if (!originalImage) return
+
+    editorSubmitting.value = true
+    try {
+        const model = selectedModelId.value || selectedConfig.value?.model || DEFAULT_MODEL_ID
+        const usesOpenAI = isOpenAIImageModel(model)
+        const request = {
+            configId: selectedConfigId.value,
+            model,
+            images: usesOpenAI ? [originalImage] : [originalImage, payload.annotatedDataUrl],
+            maskImage: usesOpenAI ? payload.maskDataUrl : undefined,
+            prompt: '移除画面中标记区域内的内容，并根据周围环境自然地填充背景，其余部分保持不变，不要保留任何标记痕迹。',
+            mode: generateMode.value
+        }
+        const { taskId } = await createGenerateTask(authToken.value, request)
+        const resultEntry = await pollEditTaskUntilDone(taskId)
+        const normalized = normalizeGalleryEntry(resultEntry)
+        galleryEntries.value = [normalized, ...galleryEntries.value]
+
+        if (context.type === 'upload') {
+            const next = [...selectedImages.value]
+            next[context.index] = normalized.imagePath
+            selectedImages.value = next
+        } else {
+            selectedGalleryEntry.value = normalized
+        }
+        editorVisible.value = false
+        showNotice('success', '智能去除完成')
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '智能去除失败'
+        showNotice('error', message)
+    } finally {
+        editorSubmitting.value = false
     }
 }
 

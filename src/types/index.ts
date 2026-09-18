@@ -23,6 +23,7 @@ export interface GenerateRequest {
     specialRequirements?: string
     mode?: GenerateMode
     brandBrief?: BrandBrief
+    maskImage?: string
 }
 
 export interface TaskImportRowFailure {

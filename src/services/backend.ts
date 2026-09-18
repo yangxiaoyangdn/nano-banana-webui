@@ -68,6 +68,14 @@ export async function verifySession(token: string) {
     return request<{ ok: boolean }>('/api/session', { method: 'GET' }, token)
 }
 
+export async function changePassword(token: string, currentPassword: string, newPassword: string) {
+    return request<{ ok: boolean }>(
+        '/api/account/password',
+        { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) },
+        token
+    )
+}
+
 export async function fetchApiConfigs(token: string) {
     return request<ApiConfigListResponse>('/api/api-configs', { method: 'GET' }, token)
 }
@@ -391,6 +399,15 @@ export async function extractBrandBrief(token: string, configId: string, model: 
         { method: 'POST', body: JSON.stringify({ configId, model, briefText }) },
         token
     )
+}
+
+export async function cropGalleryEntry(token: string, id: string, dataUrl: string) {
+    const data = await request<{ entry: GalleryEntry }>(
+        `/api/gallery/${id}/crop`,
+        { method: 'POST', body: JSON.stringify({ dataUrl }) },
+        token
+    )
+    return data.entry
 }
 
 export async function reviewGalleryEntry(
