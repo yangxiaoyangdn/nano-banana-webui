@@ -212,6 +212,17 @@
                     </BaseCard>
                 </div>
 
+                <div v-if="viewMode === 'workspace' && workspaceMode === 'image' && generateMode === 'brand'" class="mb-6">
+                    <BaseCard>
+                        <BrandBriefPanel
+                            :extracting="briefExtracting"
+                            :fields="brandBrief"
+                            @extract="handleExtractBrief"
+                            @update:fields="value => (brandBrief = value)"
+                        />
+                    </BaseCard>
+                </div>
+
                 <!-- Shared Configuration Section -->
                 <div v-if="viewMode === 'workspace' && (showAspectRatioSelector || showImageSizeConfig || showOpenAIImageConfig)" class="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4 lg:gap-6">
                     <div v-if="showAspectRatioSelector" class="flex flex-col">
@@ -313,6 +324,7 @@
                         :templates="templates"
                         v-model:filter-mode="galleryFilterMode"
                         v-model:filter-style-id="galleryFilterStyleId"
+                        v-model:filter-review-status="galleryFilterReviewStatus"
                         v-model:filter-date-from="galleryFilterDateFrom"
                         v-model:filter-date-to="galleryFilterDateTo"
                         @refresh="loadGallery"
@@ -323,7 +335,9 @@
                     <GalleryDetailModal
                         :visible="Boolean(selectedGalleryEntry)"
                         :entry="selectedGalleryEntry"
+                        :submitting="reviewSubmitting"
                         @close="selectedGalleryEntry = null"
+                        @review="handleReviewGalleryEntry"
                     />
                 </div>
 
@@ -366,6 +380,7 @@ import ApiConfigSelector from './components/ApiConfigSelector.vue'
 import ImageUpload from './components/ImageUpload.vue'
 import StylePromptSelector from './components/StylePromptSelector.vue'
 import BatchImportPanel from './components/BatchImportPanel.vue'
+import BrandBriefPanel from './components/BrandBriefPanel.vue'
 import ResultDisplay from './components/ResultDisplay.vue'
 import AspectRatioSelector from './components/AspectRatioSelector.vue'
 import Gemini3ProConfig from './components/Gemini3ProConfig.vue'
@@ -381,9 +396,11 @@ import {
     cancelGenerateTask,
     deleteApiConfig as deleteApiConfigRequest,
     deleteGalleryEntry as deleteGalleryEntryRequest,
+    reviewGalleryEntry,
     deleteTemplate as deleteTemplateRequest,
     downloadTaskImportTemplate,
     exportTemplates,
+    extractBrandBrief,
     fetchApiConfigs,
     fetchGallery,
     fetchGenerateTask,
@@ -405,6 +422,7 @@ import {
 import { LocalStorage } from './utils/storage'
 import type {
     ApiConfigSummary,
+    BrandBrief,
     GalleryEntry,
     ModelOption,
     StyleTemplate,
@@ -450,6 +468,7 @@ const galleryPage = ref(1)
 const isMobileGallery = ref(false)
 const galleryFilterMode = ref('')
 const galleryFilterStyleId = ref('')
+const galleryFilterReviewStatus = ref('')
 const galleryFilterDateFrom = ref('')
 const galleryFilterDateTo = ref('')
 const galleryPageSize = computed(() => (isMobileGallery.value ? 6 : 12))
@@ -457,6 +476,7 @@ const filteredGalleryEntries = computed(() => {
     return galleryEntries.value.filter(entry => {
         if (galleryFilterMode.value && (entry.mode || 'standard') !== galleryFilterMode.value) return false
         if (galleryFilterStyleId.value && entry.styleId !== galleryFilterStyleId.value) return false
+        if (galleryFilterReviewStatus.value && (entry.reviewStatus || 'pending') !== galleryFilterReviewStatus.value) return false
         if (galleryFilterDateFrom.value) {
             const from = new Date(`${galleryFilterDateFrom.value}T00:00:00`).getTime()
             if (Date.parse(entry.createdAt) < from) return false
@@ -477,6 +497,7 @@ const paginatedGalleryEntries = computed(() => {
     return filteredGalleryEntries.value.slice(start, start + galleryPageSize.value)
 })
 const selectedGalleryEntry = ref<GalleryEntry | null>(null)
+const reviewSubmitting = ref(false)
 
 const serverLogs = ref<ServerLogEntry[]>([])
 const logsLoading = ref(false)
@@ -514,6 +535,8 @@ const textTaskHint = ref<string | null>(null)
 const generateMode = ref<'standard' | 'brand'>('standard')
 const batchImporting = ref(false)
 const batchImportResult = ref<TaskImportResponse | null>(null)
+const briefExtracting = ref(false)
+const brandBrief = ref<BrandBrief | null>(null)
 const selectedAspectRatio = ref('1:1')
 const gemini3ImageSize = ref('2K')
 const gemini3EnableGoogleSearch = ref(false)
@@ -572,6 +595,8 @@ watch(
         if (mode === 'brand') {
             gemini3ImageSize.value = '4K'
             openAIResolutionTier.value = '4K'
+        } else {
+            brandBrief.value = null
         }
     }
 )
@@ -597,7 +622,7 @@ const handleGalleryResize = () => {
     isMobileGallery.value = window.innerWidth < 768
 }
 
-watch([galleryFilterMode, galleryFilterStyleId, galleryFilterDateFrom, galleryFilterDateTo], () => {
+watch([galleryFilterMode, galleryFilterStyleId, galleryFilterReviewStatus, galleryFilterDateFrom, galleryFilterDateTo], () => {
     galleryPage.value = 1
 })
 
@@ -1408,6 +1433,7 @@ const buildGeneratePayload = (content: GenerateContent, images: string[], mode: 
         images,
         model,
         mode,
+        brandBrief: mode === 'brand' && brandBrief.value ? brandBrief.value : undefined,
         aspectRatio: showAspectRatioSelector.value ? selectedAspectRatio.value : undefined,
         imageSize: showImageSizeConfig.value ? gemini3ImageSize.value : undefined,
         enableGoogleSearch: showGoogleSearchConfig.value ? gemini3EnableGoogleSearch.value : undefined
@@ -1602,6 +1628,45 @@ const handleImportTasksFile = async (fileBase64: string) => {
         showNotice('error', message)
     } finally {
         batchImporting.value = false
+    }
+}
+
+const handleExtractBrief = async (briefText: string) => {
+    if (!authToken.value) return
+    if (!selectedConfigId.value) {
+        showNotice('error', '请先选择 API 配置')
+        return
+    }
+    briefExtracting.value = true
+    try {
+        const model = selectedModelId.value || selectedConfig.value?.model || DEFAULT_MODEL_ID
+        const fields = await extractBrandBrief(authToken.value, selectedConfigId.value, model, briefText)
+        brandBrief.value = fields
+        showNotice('success', 'Brief 提炼完成，请检查内容后再生成')
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Brief 解析失败'
+        showNotice('error', message)
+    } finally {
+        briefExtracting.value = false
+    }
+}
+
+const handleReviewGalleryEntry = async (payload: { id: string; status: 'approved' | 'rejected' | 'pending'; rejectReason?: string; note?: string }) => {
+    if (!authToken.value) return
+    reviewSubmitting.value = true
+    try {
+        const updated = await reviewGalleryEntry(authToken.value, payload.id, payload)
+        galleryEntries.value = galleryEntries.value.map(entry => (entry.id === updated.id ? { ...entry, ...updated } : entry))
+        if (selectedGalleryEntry.value?.id === updated.id) {
+            selectedGalleryEntry.value = { ...selectedGalleryEntry.value, ...updated }
+        }
+        const messageByStatus = { approved: '已标记为通过', rejected: '已驳回', pending: '已重置为待审核' }
+        showNotice('success', messageByStatus[payload.status])
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '更新审核状态失败'
+        showNotice('error', message)
+    } finally {
+        reviewSubmitting.value = false
     }
 }
 

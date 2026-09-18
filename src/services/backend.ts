@@ -3,6 +3,7 @@ import type {
     ApiConfigListResponse,
     ApiConfigSummary,
     ApiModel,
+    BrandBrief,
     CreateApiConfigPayload,
     GalleryEntry,
     GenerateRequest,
@@ -382,4 +383,25 @@ export async function fetchGallery(token: string) {
 
 export async function deleteGalleryEntry(token: string, id: string) {
     return request<{ entry: GalleryEntry }>(`/api/gallery/${id}`, { method: 'DELETE' }, token)
+}
+
+export async function extractBrandBrief(token: string, configId: string, model: string, briefText: string) {
+    return request<BrandBrief>(
+        '/api/brief/extract',
+        { method: 'POST', body: JSON.stringify({ configId, model, briefText }) },
+        token
+    )
+}
+
+export async function reviewGalleryEntry(
+    token: string,
+    id: string,
+    payload: { status: 'approved' | 'rejected' | 'pending'; rejectReason?: string; note?: string }
+) {
+    const data = await request<{ entry: GalleryEntry }>(
+        `/api/gallery/${id}/review`,
+        { method: 'PATCH', body: JSON.stringify(payload) },
+        token
+    )
+    return data.entry
 }

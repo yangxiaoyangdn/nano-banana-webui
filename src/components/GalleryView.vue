@@ -37,6 +37,19 @@
                 </select>
             </div>
             <div class="flex flex-col gap-1">
+                <label class="text-xs font-bold text-dark-muted">审核状态</label>
+                <select
+                    :value="filterReviewStatus"
+                    class="modern-input text-sm py-1.5"
+                    @change="$emit('update:filterReviewStatus', ($event.target as HTMLSelectElement).value)"
+                >
+                    <option value="">全部</option>
+                    <option value="pending">待审核</option>
+                    <option value="approved">已通过</option>
+                    <option value="rejected">已驳回</option>
+                </select>
+            </div>
+            <div class="flex flex-col gap-1">
                 <label class="text-xs font-bold text-dark-muted">起始日期</label>
                 <input
                     type="date"
@@ -55,7 +68,7 @@
                 />
             </div>
             <BaseButton
-                v-if="filterMode || filterStyleId || filterDateFrom || filterDateTo"
+                v-if="filterMode || filterStyleId || filterReviewStatus || filterDateFrom || filterDateTo"
                 variant="secondary"
                 class="text-sm py-1.5 px-3"
                 @click="clearFilters"
@@ -89,6 +102,7 @@
                     <div class="text-xs text-dark-muted flex items-center justify-between gap-2">
                         <span>🕒 {{ formatDate(item.createdAt) }}</span>
                         <div class="flex items-center gap-1">
+                            <span :class="['text-[10px] font-bold px-2 py-0.5 rounded-full', reviewBadgeClass(item.reviewStatus)]">{{ reviewLabel(item.reviewStatus) }}</span>
                             <span :class="['text-[10px] font-bold px-2 py-0.5 rounded-full', modeBadgeClass(item.mode)]">{{ modeLabel(item.mode) }}</span>
                             <span class="font-semibold text-dark-text bg-dark-bg px-2 py-0.5 rounded-full text-[10px] truncate max-w-[100px]">{{ item.configLabel }}</span>
                         </div>
@@ -159,6 +173,7 @@ const props = defineProps<{
     templates: StyleTemplate[]
     filterMode: string
     filterStyleId: string
+    filterReviewStatus: string
     filterDateFrom: string
     filterDateTo: string
 }>()
@@ -170,17 +185,19 @@ const emit = defineEmits<{
     'show-detail': [entry: GalleryEntry]
     'update:filterMode': [value: string]
     'update:filterStyleId': [value: string]
+    'update:filterReviewStatus': [value: string]
     'update:filterDateFrom': [value: string]
     'update:filterDateTo': [value: string]
 }>()
 
 const hasActiveFilter = computed(
-    () => Boolean(props.filterMode || props.filterStyleId || props.filterDateFrom || props.filterDateTo)
+    () => Boolean(props.filterMode || props.filterStyleId || props.filterReviewStatus || props.filterDateFrom || props.filterDateTo)
 )
 
 const clearFilters = () => {
     emit('update:filterMode', '')
     emit('update:filterStyleId', '')
+    emit('update:filterReviewStatus', '')
     emit('update:filterDateFrom', '')
     emit('update:filterDateTo', '')
 }
@@ -188,6 +205,17 @@ const clearFilters = () => {
 const modeLabel = (mode?: string) => (mode === 'brand' ? '品牌' : '标准')
 const modeBadgeClass = (mode?: string) =>
     mode === 'brand' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' : 'bg-dark-bg text-dark-muted border border-dark-border'
+
+const reviewLabel = (status?: string) => {
+    if (status === 'approved') return '已通过'
+    if (status === 'rejected') return '已驳回'
+    return '待审核'
+}
+const reviewBadgeClass = (status?: string) => {
+    if (status === 'approved') return 'bg-green-500/20 text-green-400 border border-green-500/40'
+    if (status === 'rejected') return 'bg-red-500/20 text-red-400 border border-red-500/40'
+    return 'bg-dark-bg text-dark-muted border border-dark-border'
+}
 
 const handleImageError = (event: Event, item: GalleryEntry) => {
     const target = event.target as HTMLImageElement

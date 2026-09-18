@@ -552,7 +552,8 @@ async function runTask(taskId) {
                 aspectRatio: result.aspectRatioUsed,
                 imageSize: result.imageSizeUsed,
                 mode: task.rawPayload.mode || 'standard',
-                styleId: task.rawPayload.styleId || ''
+                styleId: task.rawPayload.styleId || '',
+                brandBrief: task.rawPayload.brandBrief || null
             },
             task.requestId,
             { includeImageData: false },
@@ -1129,6 +1130,36 @@ app.post('/api/templates/import', authMiddleware, async (req, res) => {
     }
 })
 
+app.post('/api/brief/extract', authMiddleware, async (req, res) => {
+    const { configId, model, briefText } = req.body || {}
+    if (!configId) {
+        return res.status(400).json({ message: '必须指定 API 配置' })
+    }
+    const text = typeof briefText === 'string' ? briefText.trim() : ''
+    if (!text) {
+        return res.status(400).json({ message: '请先粘贴或上传品牌 Brief 内容' })
+    }
+
+    try {
+        const config = await loadConfig()
+        const apiConfig = (config.apiConfigs || []).find(item => item.id === configId)
+        if (!apiConfig) {
+            return res.status(400).json({ message: '找不到对应的 API 配置' })
+        }
+        const resolvedModel = model || apiConfig.model
+        if (isOpenAIImageModel(resolvedModel)) {
+            return res.status(400).json({ message: '当前模型是纯图像生成模型，不支持解析文本 Brief，请切换到支持文本对话的模型或配置' })
+        }
+
+        const fields = await extractBrandBriefFields({ apiConfig, model: resolvedModel, briefText: text }, req.requestId)
+        logInfo('品牌Brief', 'Brief 解析成功', { configId, briefLength: text.length }, req.requestId)
+        res.json(fields)
+    } catch (error) {
+        logError('品牌Brief', 'Brief 解析失败', error, req.requestId)
+        res.status(500).json({ message: error instanceof Error ? error.message : 'Brief 解析失败' })
+    }
+})
+
 app.get('/api/gallery', authMiddleware, async (req, res) => {
     try {
         const entries = await loadGallery()
@@ -1161,6 +1192,24 @@ app.post('/api/generate/task', authMiddleware, async (req, res) => {
         } catch (error) {
             logError('生成', '指令组装失败', error, req.requestId)
             return res.status(500).json({ message: '指令组装失败，请稍后重试' })
+        }
+    }
+
+    // 模块①-c 品牌Brief解析：人工确认过的品牌要点作为额外约束，追加在风格库字段之后一起参与指令组装。
+    if (payload.brandBrief) {
+        const brief = payload.brandBrief
+        const briefLines = []
+        if (typeof brief.coreRequirement === 'string' && brief.coreRequirement.trim()) {
+            briefLines.push(`品牌核心诉求：${brief.coreRequirement.trim()}`)
+        }
+        if (typeof brief.visualTone === 'string' && brief.visualTone.trim()) {
+            briefLines.push(`品牌视觉基调：${brief.visualTone.trim()}`)
+        }
+        if (typeof brief.forbidden === 'string' && brief.forbidden.trim()) {
+            briefLines.push(`品牌禁忌项：${brief.forbidden.trim()}`)
+        }
+        if (briefLines.length) {
+            payload.prompt = [payload.prompt, ...briefLines].filter(Boolean).join('\n')
         }
     }
 
@@ -1779,6 +1828,76 @@ async function generateChatCompatibleImage({ apiConfig, prompt, images, model, a
     }
 }
 
+// 模块①-c 品牌Brief解析：复用当前选中的 API 配置做一次纯文本对话调用（不请求图像），
+// 让模型把品牌方 brief 提炼成三项结构化要点，交由人工确认后再参与模块③指令组装。
+async function extractBrandBriefFields({ apiConfig, model, briefText }, requestId, signal) {
+    const prompt = `你是广告/摄影行业的品牌需求分析助手。请阅读下面的品牌方 brief 文档，提炼出三项结构化要点，严格以 JSON 格式输出（不要包含 JSON 以外的任何文字，也不要用 markdown 代码块包裹），字段如下：
+{"coreRequirement": "核心诉求：一到两句话概括这次拍摄/出图要达成的核心目的和重点", "visualTone": "视觉基调：整体氛围、光线、质感、构图倾向等描述", "forbidden": "禁忌项：明确不能出现的元素、风格、竞品相关内容等，没有则填空字符串"}
+
+品牌方 brief 原文：
+${briefText}`
+
+    const response = await fetchWithRetry(
+        apiConfig.endpoint,
+        {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${apiConfig.apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model,
+                messages: [{ role: 'user', content: prompt }]
+            }),
+            signal
+        },
+        { timeoutMs: DEFAULT_UPSTREAM_TIMEOUT_MS, retries: DEFAULT_UPSTREAM_RETRIES, retryDelayMs: DEFAULT_UPSTREAM_RETRY_DELAY_MS }
+    )
+
+    if (!response.ok) {
+        const text = await response.text()
+        throw new Error(`Brief 解析请求失败 ${response.status}: ${text}`)
+    }
+
+    const data = await response.json()
+    const choice = data.choices?.[0]?.message
+    const textContent = extractTextResponse(choice?.content)
+    if (!textContent) {
+        throw new Error('模型未返回解析结果')
+    }
+    logInfo('品牌Brief', 'Brief 解析上游调用成功', { model }, requestId)
+    return parseBriefJson(textContent)
+}
+
+function parseBriefJson(text) {
+    const cleaned = text
+        .trim()
+        .replace(/^```(?:json)?/i, '')
+        .replace(/```$/, '')
+        .trim()
+
+    let parsed
+    try {
+        parsed = JSON.parse(cleaned)
+    } catch {
+        const match = cleaned.match(/\{[\s\S]*\}/)
+        if (!match) {
+            throw new Error('AI 返回内容无法解析为结构化字段，请重试或手动填写')
+        }
+        try {
+            parsed = JSON.parse(match[0])
+        } catch {
+            throw new Error('AI 返回内容无法解析为结构化字段，请重试或手动填写')
+        }
+    }
+
+    return {
+        coreRequirement: typeof parsed.coreRequirement === 'string' ? parsed.coreRequirement.trim() : '',
+        visualTone: typeof parsed.visualTone === 'string' ? parsed.visualTone.trim() : '',
+        forbidden: typeof parsed.forbidden === 'string' ? parsed.forbidden.trim() : ''
+    }
+}
+
 function extractImagesFromChoice(choice) {
     const candidates = []
 
@@ -2015,7 +2134,7 @@ function filterTextResponse(text) {
 }
 
 async function persistGalleryEntry(
-    { prompt, responseText, imageSource, imageCandidates, configLabel, configId, modelId, aspectRatio, imageSize, mode, styleId },
+    { prompt, responseText, imageSource, imageCandidates, configLabel, configId, modelId, aspectRatio, imageSize, mode, styleId, brandBrief },
     requestId,
     { includeImageData } = { includeImageData: false },
     onStage
@@ -2044,6 +2163,12 @@ async function persistGalleryEntry(
         imageSize: imageSize || '',
         mode: mode || 'standard',
         styleId: styleId || '',
+        brandBrief: brandBrief || null,
+        // 模块⑥人工审核：新生成的图默认待审核，通过/驳回后回填结果，驳回原因用于反哺风格库。
+        reviewStatus: 'pending',
+        rejectReason: '',
+        reviewNote: '',
+        reviewedAt: '',
         createdAt: new Date().toISOString()
     }
     entries.unshift(entry)
@@ -2157,6 +2282,45 @@ async function generateThumbnailFromPrimary(buffer, thumbnailPath, requestId) {
     }
 }
 
+
+// 模块⑥人工审核：驳回原因清单固定为这7类，跟发布的团队决议文档保持一致。
+const REJECT_REASONS = ['主体特征不符', '环境基调不符', '构图不对', '色彩不对', '出现禁用元素', '主体变形/瑕疵', '其他']
+
+app.patch('/api/gallery/:id/review', authMiddleware, async (req, res) => {
+    const { status, rejectReason, note } = req.body || {}
+    if (!['approved', 'rejected', 'pending'].includes(status)) {
+        return res.status(400).json({ message: 'status 必须是 approved / rejected / pending' })
+    }
+    if (status === 'rejected' && !REJECT_REASONS.includes(rejectReason)) {
+        return res.status(400).json({ message: '请选择有效的驳回原因分类' })
+    }
+
+    try {
+        const entries = await loadGallery()
+        const index = entries.findIndex(entry => entry.id === req.params.id)
+        if (index === -1) {
+            return res.status(404).json({ message: '图库记录不存在' })
+        }
+        entries[index] = {
+            ...entries[index],
+            reviewStatus: status,
+            rejectReason: status === 'rejected' ? rejectReason : '',
+            reviewNote: status === 'pending' ? '' : typeof note === 'string' ? note.trim() : '',
+            reviewedAt: status === 'pending' ? '' : new Date().toISOString()
+        }
+        await saveGallery(entries)
+        logInfo(
+            '审核',
+            `图库记录 ${req.params.id} 已${status === 'approved' ? '通过' : '驳回'}`,
+            { rejectReason: entries[index].rejectReason },
+            req.requestId
+        )
+        res.json({ entry: entries[index] })
+    } catch (error) {
+        logError('审核', '更新审核状态失败', error, req.requestId)
+        res.status(500).json({ message: '更新审核状态失败' })
+    }
+})
 
 app.delete('/api/gallery/:id', authMiddleware, async (req, res) => {
     try {

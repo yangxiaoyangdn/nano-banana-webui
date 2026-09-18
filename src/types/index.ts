@@ -1,5 +1,11 @@
 export type GenerateMode = 'standard' | 'brand'
 
+export interface BrandBrief {
+    coreRequirement: string
+    visualTone: string
+    forbidden: string
+}
+
 export interface GenerateRequest {
     configId: string
     prompt?: string
@@ -16,6 +22,7 @@ export interface GenerateRequest {
     styleId?: string
     specialRequirements?: string
     mode?: GenerateMode
+    brandBrief?: BrandBrief
 }
 
 export interface TaskImportRowFailure {
@@ -127,6 +134,18 @@ export interface UpdateApiConfigPayload {
     apiKey?: string
 }
 
+export type ReviewStatus = 'pending' | 'approved' | 'rejected'
+
+export const REJECT_REASONS = [
+    '主体特征不符',
+    '环境基调不符',
+    '构图不对',
+    '色彩不对',
+    '出现禁用元素',
+    '主体变形/瑕疵',
+    '其他'
+] as const
+
 export interface GalleryEntry {
     id: string
     prompt: string
@@ -141,6 +160,11 @@ export interface GalleryEntry {
     imageSize?: string
     mode?: GenerateMode
     styleId?: string
+    brandBrief?: BrandBrief
+    reviewStatus?: ReviewStatus
+    rejectReason?: string
+    reviewNote?: string
+    reviewedAt?: string
     createdAt: string
 }
 

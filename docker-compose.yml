@@ -1,6 +1,8 @@
 services:
   backend:
-    image: ghcr.io/hahaha8459812/nano-banana-webui:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.server
     container_name: image-studio
     networks:
       - nano-banana-net
